@@ -56,7 +56,7 @@ void SubsonicClient::setSettings(const SubsonicSettings& settings)
     m_settings = settings;
 }
 
-void SubsonicClient::getArtists(ArtistsCallback callback)
+void SubsonicClient::getArtists(ArrayCallback callback)
 {
     get(u"getArtists"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
         if(!error.isEmpty()) {
@@ -91,6 +91,23 @@ void SubsonicClient::getAlbum(const QString& id, ObjectCallback callback)
     get(u"getAlbum"_s, query,
         [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
             callback(response.value(u"album"_s).toObject(), error);
+        });
+}
+
+void SubsonicClient::getPlaylists(ArrayCallback callback)
+{
+    get(u"getPlaylists"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
+        callback(asArray(response.value(u"playlists"_s).toObject().value(u"playlist"_s)), error);
+    });
+}
+
+void SubsonicClient::getPlaylist(const QString& id, ObjectCallback callback)
+{
+    QUrlQuery query;
+    query.addQueryItem(u"id"_s, id);
+    get(u"getPlaylist"_s, query,
+        [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
+            callback(response.value(u"playlist"_s).toObject(), error);
         });
 }
 

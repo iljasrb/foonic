@@ -53,6 +53,7 @@ public:
 
     SubsonicDownloadManager(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
                             PlayerController* player, PlaylistHandler* handler, QObject* parent = nullptr);
+    ~SubsonicDownloadManager() override;
 
     /*!
      * Registers @p songs for caching. @p urls are the remote stream URLs used for the corresponding
@@ -62,6 +63,9 @@ public:
 
     /*! Ensures the track with @p songId is cached, calling @p onDone when it is (or fails). */
     void ensureDownloaded(const QString& songId, std::function<void(bool)> onDone = {});
+
+    /*! Re-applies the current playback mode to the current track (stop caching, or start caching it). */
+    void applyPlaybackMode();
 
     [[nodiscard]] CacheState cacheStateForSong(const QString& songId) const;
     [[nodiscard]] int downloadProgressForSong(const QString& songId) const;
@@ -87,6 +91,7 @@ private:
     };
 
     void onCurrentTrackChanged(const Track& track);
+    void cancelDownloads();
     void tryApplyPendingSeek();
     void request(int index, bool priority = false);
     void processNext();
@@ -114,6 +119,7 @@ private:
     int m_active{-1};
     int m_priority{-1};
     int m_gateIndex{-1};
+    bool m_cancelActive{false};
     uint64_t m_pendingSeekPosition{0};
     QString m_pendingSeekPath;
 

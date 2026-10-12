@@ -8,9 +8,14 @@
 
 #include <core/track.h>
 
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
+#include <QHash>
+#include <QPixmap>
 #include <QPoint>
+#include <QSet>
+#include <QStringList>
 #include <QWidget>
 
 #include <functional>
@@ -20,6 +25,8 @@
 #include <vector>
 
 class QLabel;
+class QLineEdit;
+class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -80,8 +87,17 @@ private:
     void applyAction(const TrackList& tracks, BrowserAction action, bool startPlayback);
     [[nodiscard]] Track trackForSong(const QJsonObject& song, const QString& filepath) const;
     [[nodiscard]] QString cacheText(const QString& songId) const;
-    [[nodiscard]] QTreeWidgetItem* findSongItem(const QString& songId) const;
-    void updateCacheColumn(const QString& songId);
+    void updateDownloadProgress();
+    void applyCover(QTreeWidgetItem* item, const QString& coverArtId);
+    void requestCover(const QString& coverArtId);
+    void applyCoverToTree(const QString& coverArtId);
+    void applyFilter();
+    void clearTree();
+    void rebuildArtistTree();
+    void buildSearchTree(const QJsonObject& result);
+    QTreeWidgetItem* createArtistItem(const QJsonObject& artist, QTreeWidgetItem* parent = nullptr);
+    QTreeWidgetItem* createAlbumItem(QTreeWidgetItem* parent, const QJsonObject& album);
+    QTreeWidgetItem* createSongItem(QTreeWidgetItem* parent, const QJsonObject& song);
     void setStatus(const QString& text);
 
     std::shared_ptr<NetworkAccessManager> m_network;
@@ -91,9 +107,21 @@ private:
     SubsonicClient* m_client;
     QLabel* m_status;
     QTreeWidget* m_tree;
+    QLineEdit* m_filter{nullptr};
+    QTimer* m_filterTimer{nullptr};
+    QString m_filterText;
     std::map<QTreeWidgetItem*, std::vector<std::function<void()>>> m_pendingLoads;
     std::set<QTreeWidgetItem*> m_loading;
+    QHash<QString, QPixmap> m_coverCache;
+    QSet<QString> m_coverRequests;
+    QList<QJsonObject> m_artists;
+    QHash<QString, QJsonArray> m_albumsByArtist;
+    QHash<QString, QJsonArray> m_songsByAlbum;
+    int m_searchGeneration{0};
+    bool m_filterMode{false};
+    bool m_applyingFilter{false};
     int m_generation{0};
+    int m_treeGeneration{0};
 };
 } // namespace Subsonic
 } // namespace Fooyin

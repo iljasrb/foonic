@@ -229,6 +229,9 @@ void SubsonicSettingsPageWidget::apply()
     settings.cacheLimitMb           = m_cacheLimit->value();
 
     saveSubsonicSettings(m_settings, settings);
+    if(m_downloads) {
+        m_downloads->applyPlaybackMode();
+    }
     // Persist immediately so the choice survives an unclean exit (the core only flushes every 5 minutes).
     m_settings->storeSettings();
 

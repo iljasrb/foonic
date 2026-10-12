@@ -36,6 +36,8 @@ namespace {
 constexpr int MaxAttempts = 5;
 constexpr int RetryDelayMs = 750;
 constexpr qint64 ProgressEmitIntervalMs = 250;
+// Restarting this close to the start of a track is effectively inaudible, so we can skip the seek.
+constexpr uint64_t ResumeSeekThresholdMs = 1000;
 } // namespace
 
 namespace Fooyin::Subsonic {
@@ -54,6 +56,22 @@ SubsonicDownloadManager::SubsonicDownloadManager(std::shared_ptr<NetworkAccessMa
                 &SubsonicDownloadManager::onCurrentTrackChanged);
         connect(m_player, &PlayerController::currentTrackSeekableChanged, this,
                 [this](bool) { tryApplyPendingSeek(); });
+    }
+}
+
+SubsonicDownloadManager::~SubsonicDownloadManager()
+{
+    // Disconnect first so aborting the reply doesn't re-enter this half-destroyed object.
+    if(m_reply) {
+        m_reply->disconnect(this);
+        m_reply->abort();
+        m_reply->deleteLater();
+        m_reply = nullptr;
+    }
+    if(m_file) {
+        m_file->close();
+        delete m_file;
+        m_file = nullptr;
     }
 }
 
@@ -149,8 +167,63 @@ void SubsonicDownloadManager::ensureDownloaded(const QString& songId, std::funct
     request(index, true);
 }
 
+void SubsonicDownloadManager::applyPlaybackMode()
+{
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    if(settings.playbackMode == PlaybackMode::Stream) {
+        cancelDownloads();
+        return;
+    }
+
+    // Download-first: start caching whatever is playing now (plus its prefetch window).
+    if(m_player) {
+        const Track current = m_player->currentTrack();
+        if(current.isValid()) {
+            onCurrentTrackChanged(current);
+        }
+    }
+}
+
+void SubsonicDownloadManager::cancelDownloads()
+{
+    m_requests.clear();
+    m_priority = -1;
+    const bool wasGated = m_gateIndex >= 0;
+    m_gateIndex           = -1;
+    m_pendingSeekPosition = 0;
+    m_pendingSeekPath.clear();
+
+    if(m_active >= 0) {
+        m_cancelActive = true;
+        if(m_reply) {
+            m_reply->abort();
+        }
+        else {
+            m_cancelActive = false;
+            finishCurrent(false);
+        }
+    }
+
+    if(wasGated && m_player) {
+        m_player->play();
+    }
+
+    Q_EMIT downloadProgressChanged();
+}
+
 void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
 {
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+
+    // Stream mode never caches, so don't register or download anything (including restored playlists).
+    if(settings.playbackMode == PlaybackMode::Stream) {
+        m_requests.clear();
+        m_priority            = -1;
+        m_pendingSeekPosition = 0;
+        m_pendingSeekPath.clear();
+        return;
+    }
+
     // A promotion re-commits the same track with its local file. Apply the saved position once the
     // local track is current; if a different track starts, drop the pending seek.
     if(m_pendingSeekPosition != 0) {
@@ -162,8 +235,6 @@ void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
             m_pendingSeekPath.clear();
         }
     }
-
-    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
 
     int index = -1;
     for(int i{0}; i < static_cast<int>(m_entries.size()); ++i) {
@@ -309,6 +380,7 @@ void SubsonicDownloadManager::processNext()
     m_requestStart = 0;
     m_total        = -1;
     m_attempts     = 0;
+    m_lastProgressEmit = 0;
 
     m_client->setSettings(loadSubsonicSettings(m_settings));
 
@@ -321,6 +393,10 @@ void SubsonicDownloadManager::processNext()
     const bool resuming = existing > 0 && (expected <= 0 || existing < expected);
     m_received          = resuming ? existing : 0;
 
+    if(m_file) {
+        m_file->close();
+        delete m_file;
+    }
     m_file = new QFile{entry.path};
     const auto openMode
         = resuming ? (QIODevice::WriteOnly | QIODevice::Append) : QIODevice::WriteOnly;
@@ -338,7 +414,7 @@ void SubsonicDownloadManager::processNext()
 
 void SubsonicDownloadManager::startRequest()
 {
-    if(m_active < 0) {
+    if(m_active < 0 || m_cancelActive) {
         return;
     }
 
@@ -403,7 +479,12 @@ void SubsonicDownloadManager::handleReadyRead()
         return;
     }
 
-    m_file->write(data);
+    if(m_file->write(data) != data.size()) {
+        qCWarning(SUBSONIC) << "Failed to write to" << m_file->fileName() << "(disk full?)";
+        m_cancelActive = true;
+        m_reply->abort();
+        return;
+    }
     m_received += data.size();
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -431,6 +512,12 @@ void SubsonicDownloadManager::handleFinished()
     reply->deleteLater();
 
     if(m_active < 0) {
+        return;
+    }
+
+    if(m_cancelActive) {
+        m_cancelActive = false;
+        finishCurrent(false);
         return;
     }
 
@@ -486,7 +573,8 @@ void SubsonicDownloadManager::finishCurrent(bool ok)
             }
         }
 
-        if(ok && index == m_gateIndex && m_player) {
+        if(index == m_gateIndex && m_player) {
+            // Resume even on failure so a failed download can't leave playback paused forever.
             m_gateIndex = -1;
             QMetaObject::invokeMethod(
                 this, [this] { m_player->play(); }, Qt::QueuedConnection);
@@ -511,6 +599,32 @@ void SubsonicDownloadManager::promoteEntryToLocal(int index)
     QMetaObject::invokeMethod(
         this,
         [this, entry, localTrack] {
+            // Commit the current track before the (potentially slow) playlist rewrite so the engine
+            // starts loading the local file as early as possible. A restart near the start of a track
+            // is inaudible, so skip the position restore there.
+            if(m_player && m_player->currentTrack().filepath() == entry.url) {
+                PlaylistTrack current = m_player->currentPlaylistTrack();
+                if(current.isValid()) {
+                    current.track           = localTrack;
+                    const uint64_t position = m_player->currentPosition();
+
+                    if(position > ResumeSeekThresholdMs) {
+                        m_pendingSeekPosition = position;
+                        m_pendingSeekPath     = localTrack.filepath();
+                        qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path << "at"
+                                         << position << "ms";
+                    }
+                    else {
+                        m_pendingSeekPosition = 0;
+                        m_pendingSeekPath.clear();
+                        qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path
+                                         << "near start; restarting without seek";
+                    }
+
+                    m_player->changeCurrentTrack(current);
+                }
+            }
+
             if(m_handler) {
                 for(Playlist* playlist : m_handler->playlists()) {
                     PlaylistTrackList playlistTracks = playlist->playlistTracks();
@@ -527,18 +641,6 @@ void SubsonicDownloadManager::promoteEntryToLocal(int index)
                     }
                 }
             }
-
-            if(m_player && m_player->currentTrack().filepath() == entry.url) {
-                PlaylistTrack current = m_player->currentPlaylistTrack();
-                if(current.isValid()) {
-                    current.track         = localTrack;
-                    m_pendingSeekPosition = m_player->currentPosition();
-                    m_pendingSeekPath     = localTrack.filepath();
-                    qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path << "at"
-                                     << m_pendingSeekPosition << "ms";
-                    m_player->changeCurrentTrack(current);
-                }
-            }
         },
         Qt::QueuedConnection);
 }
@@ -551,29 +653,56 @@ void SubsonicDownloadManager::evictCacheIfNeeded()
     }
     const qint64 limit = static_cast<qint64>(limitMb) * 1024 * 1024;
 
-    QFileInfoList files = QDir{m_dir}.entryInfoList(QDir::Files, QDir::Time); // newest first
+    // Only evict files this manager downloaded. Listing the whole directory could delete unrelated
+    // files when the download folder is a shared/misconfigured path.
+    QFileInfoList files;
     qint64 total{0};
-    for(const QFileInfo& info : std::as_const(files)) {
+    for(const Entry& entry : m_entries) {
+        if(!entry.done) {
+            continue;
+        }
+        const QFileInfo info{entry.path};
+        if(!info.exists()) {
+            continue;
+        }
+        files.push_back(info);
         total += info.size();
     }
     if(total <= limit) {
         return;
     }
 
-    const QString currentPath = m_player ? m_player->currentTrack().filepath() : QString{};
+    std::sort(files.begin(), files.end(), [](const QFileInfo& a, const QFileInfo& b) {
+        return a.lastModified() < b.lastModified();
+    });
+
+    // Protect the file backing whatever is playing right now. The engine may still be playing the
+    // remote URL even though the playlist entry already points at the local file.
+    QString currentPath = m_player ? m_player->currentTrack().filepath() : QString{};
+    for(const Entry& entry : m_entries) {
+        if(!currentPath.isEmpty() && entry.url == currentPath) {
+            currentPath = entry.path;
+            break;
+        }
+    }
     const QString activePath
         = (m_active >= 0 && m_active < static_cast<int>(m_entries.size())) ? m_entries[m_active].path : QString{};
-    for(int i = files.size() - 1; i >= 0 && total > limit; --i) {
-        const QFileInfo& info = files.at(i);
+    for(const QFileInfo& info : std::as_const(files)) {
+        if(total <= limit) {
+            break;
+        }
         if(info.absoluteFilePath() == currentPath || info.absoluteFilePath() == activePath) {
             continue;
         }
 
         total -= info.size();
-        QFile::remove(info.absoluteFilePath());
+        if(!QFile::remove(info.absoluteFilePath())) {
+            continue;
+        }
         for(Entry& entry : m_entries) {
             if(entry.path == info.absoluteFilePath()) {
                 entry.done = false;
+                Q_EMIT cacheStateChanged(entry.song.value(u"id"_s).toString());
             }
         }
         qCInfo(SUBSONIC) << "Evicted cached file" << info.absoluteFilePath();
@@ -660,11 +789,12 @@ void SubsonicDownloadManager::clearCache()
     const QString activePath
         = (m_active >= 0 && m_active < static_cast<int>(m_entries.size())) ? m_entries[m_active].path : QString{};
     for(Entry& entry : m_entries) {
-        if(entry.path == currentPath || entry.path == activePath) {
+        if(entry.path == currentPath || entry.url == currentPath || entry.path == activePath) {
             continue;
         }
         if(QFile::remove(entry.path)) {
             entry.done = false;
+            Q_EMIT cacheStateChanged(entry.song.value(u"id"_s).toString());
         }
     }
     Q_EMIT downloadProgressChanged();

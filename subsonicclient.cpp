@@ -101,6 +101,32 @@ void SubsonicClient::ping(std::function<void(const QString& error)> callback)
     });
 }
 
+void SubsonicClient::search(const QString& query, SearchCallback callback)
+{
+    const auto makeQuery = [query] {
+        QUrlQuery q;
+        q.addQueryItem(u"query"_s, query);
+        q.addQueryItem(u"artistCount"_s, u"30"_s);
+        q.addQueryItem(u"albumCount"_s, u"30"_s);
+        q.addQueryItem(u"songCount"_s, u"60"_s);
+        return q;
+    };
+
+    // search3 is the ID3 version (OpenSubsonic/Navidrome); older servers only have search2.
+    get(u"search3"_s, makeQuery(),
+        [this, makeQuery, callback = std::move(callback)](const QJsonObject& response, const QString& error) mutable {
+            if(error.isEmpty()) {
+                callback(response.value(u"searchResult3"_s).toObject(), {});
+                return;
+            }
+
+            get(u"search2"_s, makeQuery(),
+                [callback = std::move(callback)](const QJsonObject& response2, const QString& error2) mutable {
+                    callback(response2.value(u"searchResult2"_s).toObject(), error2);
+                });
+        });
+}
+
 QUrl SubsonicClient::streamUrl(const QString& id) const
 {
     QUrlQuery query;
@@ -121,11 +147,11 @@ QUrl SubsonicClient::streamUrl(const QString& id) const
     return buildUrl(u"stream"_s, query);
 }
 
-QUrl SubsonicClient::coverArtUrl(const QString& id) const
+QUrl SubsonicClient::coverArtUrl(const QString& id, int size) const
 {
     QUrlQuery query;
     query.addQueryItem(u"id"_s, id);
-    query.addQueryItem(u"size"_s, u"300"_s);
+    query.addQueryItem(u"size"_s, QString::number(size));
     return buildUrl(u"getCoverArt"_s, query);
 }
 

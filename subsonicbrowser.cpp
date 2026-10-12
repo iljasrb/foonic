@@ -13,21 +13,26 @@
 
 #include <gui/playlist/playlistinteractor.h>
 #include <gui/trackmimedata.h>
+#include <core/network/networkaccessmanager.h>
 #include <core/player/playercontroller.h>
 
 #include <utils/id.h>
 #include <utils/settings/settingsdialogcontroller.h>
 
-#include <QFile>
-#include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
+#include <QHeaderView>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
-#include <QPointer>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPushButton>
 #include <QStringList>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QTreeWidgetItemIterator>
@@ -40,6 +45,7 @@ constexpr int KindRole   = Qt::UserRole;
 constexpr int IdRole     = Qt::UserRole + 1;
 constexpr int JsonRole   = Qt::UserRole + 2;
 constexpr int LoadedRole = Qt::UserRole + 3;
+constexpr int CoverRole  = Qt::UserRole + 4;
 
 enum ItemKind : uint8_t
 {
@@ -47,6 +53,7 @@ enum ItemKind : uint8_t
     Artist      = 1,
     Album       = 2,
     Song        = 3,
+    ResultHeader = 4,
 };
 
 QJsonArray asArray(const QJsonValue& value)
@@ -102,12 +109,29 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
 
     auto* refreshButton = new QPushButton{tr("Refresh"), this};
 
+    m_filter = new QLineEdit{this};
+    m_filter->setPlaceholderText(tr("Filter..."));
+    m_filter->setClearButtonEnabled(true);
+    m_filter->setMaximumWidth(220);
+
+    m_filterTimer = new QTimer{this};
+    m_filterTimer->setSingleShot(true);
+    m_filterTimer->setInterval(150);
+
     auto* toolbar = new QHBoxLayout;
     toolbar->addWidget(refreshButton);
     toolbar->addWidget(m_status, 1);
+    toolbar->addWidget(m_filter);
 
     m_tree->setHeaderLabels({tr("Name"), tr("Artist"), tr("Album"), tr("Length"), tr("Size"), tr("Cache")});
     m_tree->setUniformRowHeights(true);
+    m_tree->setIconSize(QSize{24, 24});
+    m_tree->setAlternatingRowColors(true);
+    m_tree->setRootIsDecorated(true);
+    m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    for(int column{1}; column < m_tree->columnCount(); ++column) {
+        m_tree->header()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+    }
     m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_tree->setDragEnabled(true);
     m_tree->setDragDropMode(QAbstractItemView::DragOnly);
@@ -120,6 +144,11 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     layout->addWidget(m_tree, 1);
 
     connect(refreshButton, &QPushButton::clicked, this, &SubsonicBrowser::refresh);
+    connect(m_filterTimer, &QTimer::timeout, this, &SubsonicBrowser::applyFilter);
+    connect(m_filter, &QLineEdit::textChanged, this, [this](const QString& text) {
+        m_filterText = text.trimmed();
+        m_filterTimer->start();
+    });
     connect(m_tree, &QTreeWidget::itemExpanded, this, &SubsonicBrowser::onExpanded);
     connect(m_tree, &QTreeWidget::itemClicked, this,
             [this](QTreeWidgetItem* item, int) { ensureChildrenLoaded(item); });
@@ -140,14 +169,16 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &SubsonicBrowser::showContextMenu);
 
     if(m_downloads) {
-        connect(m_downloads, &SubsonicDownloadManager::cacheStateChanged, this,
-                [this](const QString& songId) { updateCacheColumn(songId); });
+        connect(m_downloads, &SubsonicDownloadManager::downloadProgressChanged, this,
+                &SubsonicBrowser::updateDownloadProgress);
     }
 
     // Refresh once the (modeless) settings dialog is closed so config changes take effect.
     if(auto* controller = m_settings->settingsDialog()) {
         connect(controller, &SettingsDialogController::closing, this, [this] {
             m_client->setSettings(loadSubsonicSettings(m_settings));
+            m_coverCache.clear();
+            m_coverRequests.clear();
             refresh();
         });
     }
@@ -162,9 +193,11 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
 void SubsonicBrowser::refresh()
 {
     ++m_generation;
-    m_pendingLoads.clear();
-    m_loading.clear();
-    m_tree->clear();
+    clearTree();
+    m_artists.clear();
+    m_albumsByArtist.clear();
+    m_songsByAlbum.clear();
+    m_filterMode = false;
 
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     if(!settings.isValid()) {
@@ -185,16 +218,20 @@ void SubsonicBrowser::refresh()
             return;
         }
 
+        m_artists.reserve(artists.size());
         for(const QJsonValue& value : artists) {
             const QJsonObject artist = value.toObject();
-            auto* item               = new QTreeWidgetItem{m_tree};
-            item->setText(0, artist.value(u"name"_s).toString());
-            item->setData(0, KindRole, Artist);
-            item->setData(0, IdRole, artist.value(u"id"_s).toString());
+            m_artists.push_back(artist);
+            auto* item = createArtistItem(artist);
             addPlaceholder(item);
         }
 
-        setStatus(tr("%1 artists").arg(artists.size()));
+        if(!m_filterText.isEmpty()) {
+            applyFilter();
+        }
+        else {
+            setStatus(tr("%1 artists").arg(artists.size()));
+        }
     });
 }
 
@@ -242,6 +279,12 @@ TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
             const int kind = item->data(0, KindRole).toInt();
             if(kind == Song) {
                 songs.push_back(item->data(0, JsonRole).toJsonObject());
+            } else if(kind == ResultHeader) {
+                QList<QTreeWidgetItem*> children;
+                for(int i{0}; i < item->childCount(); ++i) {
+                    children.push_back(item->child(i));
+                }
+                collect(children);
             } else if(kind == Artist || kind == Album) {
                 ensureChildrenLoaded(item, false);
                 QList<QTreeWidgetItem*> children;
@@ -302,11 +345,11 @@ void SubsonicBrowser::loadChildren(QTreeWidgetItem* item, int kind, const QStrin
     }
     m_loading.insert(item);
 
-    const int generation = m_generation;
-    auto callback = [this, item, kind, generation, expand](const QJsonObject& object, const QString& error) {
+    const int treeGeneration = m_treeGeneration;
+    auto callback = [this, item, kind, treeGeneration, expand](const QJsonObject& object, const QString& error) {
         m_loading.erase(item);
 
-        if(generation == m_generation) {
+        if(treeGeneration == m_treeGeneration) {
             if(error.isEmpty()) {
                 populateChildren(item, kind, object, expand);
             } else {
@@ -330,8 +373,21 @@ void SubsonicBrowser::loadChildren(QTreeWidgetItem* item, int kind, const QStrin
     };
 
     if(kind == Artist) {
+        if(const auto cached = m_albumsByArtist.constFind(id); cached != m_albumsByArtist.constEnd()) {
+            QJsonObject object;
+            object[u"album"_s] = cached.value();
+            callback(object, {});
+            return;
+        }
         m_client->getArtist(id, callback);
-    } else {
+    }
+    else {
+        if(const auto cached = m_songsByAlbum.constFind(id); cached != m_songsByAlbum.constEnd()) {
+            QJsonObject object;
+            object[u"song"_s] = cached.value();
+            callback(object, {});
+            return;
+        }
         m_client->getAlbum(id, callback);
     }
 }
@@ -345,56 +401,85 @@ void SubsonicBrowser::populateChildren(QTreeWidgetItem* item, int kind, const QJ
     item->setData(0, LoadedRole, true);
 
     if(kind == Artist) {
-        for(const QJsonValue& value : asArray(object.value(u"album"_s))) {
-            const QJsonObject album = value.toObject();
-            auto* child             = new QTreeWidgetItem{item};
-            child->setText(0, album.value(u"name"_s).toString());
-            child->setText(1, album.value(u"artist"_s).toString());
-            child->setText(2, QString::number(album.value(u"year"_s).toInt()));
-            child->setData(0, KindRole, Album);
-            child->setData(0, IdRole, album.value(u"id"_s).toString());
+        const QJsonArray albums = asArray(object.value(u"album"_s));
+        m_albumsByArtist.insert(item->data(0, IdRole).toString(), albums);
+        for(const QJsonValue& value : albums) {
+            auto* child = createAlbumItem(item, value.toObject());
             addPlaceholder(child);
 
             // Pre-load each album's songs so the artist (and album) can be dragged as a whole
             // without expanding every album first.
             ensureChildrenLoaded(child, false);
         }
-    } else if(kind == Album) {
-        for(const QJsonValue& value : asArray(object.value(u"song"_s))) {
-            const QJsonObject song = value.toObject();
-            auto* child            = new QTreeWidgetItem{item};
-            child->setText(0, song.value(u"title"_s).toString());
-            child->setText(1, song.value(u"artist"_s).toString());
-            child->setText(2, song.value(u"album"_s).toString());
-
-            const int seconds = song.value(u"duration"_s).toInt();
-            if(seconds > 0) {
-                child->setText(3, u"%1:%2"_s.arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char{'0'}));
-            }
-
-            const qint64 size = songSize(song);
-            if(size > 0) {
-                child->setText(4, formatBytes(size));
-            }
-
-            qCInfo(SUBSONIC) << "Track:" << song.value(u"title"_s).toString()
-                             << "artist=" << song.value(u"artist"_s).toString() << "size=" << size << "bytes"
-                             << "duration=" << seconds << "s"
-                             << "bitrate=" << song.value(u"bitRate"_s).toInt() << "kbps"
-                             << "codec=" << song.value(u"suffix"_s).toString();
-
-            child->setData(0, KindRole, Song);
-            child->setData(0, IdRole, song.value(u"id"_s).toString());
-            child->setData(0, JsonRole, song);
-
-            const QString songId = song.value(u"id"_s).toString();
-            child->setText(5, cacheText(songId));
+    }
+    else if(kind == Album) {
+        const QJsonArray songs = asArray(object.value(u"song"_s));
+        m_songsByAlbum.insert(item->data(0, IdRole).toString(), songs);
+        for(const QJsonValue& value : songs) {
+            createSongItem(item, value.toObject());
         }
     }
 
     if(expand) {
         item->setExpanded(true);
     }
+}
+
+QTreeWidgetItem* SubsonicBrowser::createArtistItem(const QJsonObject& artist, QTreeWidgetItem* parent)
+{
+    auto* item = parent ? new QTreeWidgetItem{parent} : new QTreeWidgetItem{m_tree};
+    item->setText(0, artist.value(u"name"_s).toString());
+    item->setData(0, KindRole, Artist);
+    item->setData(0, IdRole, artist.value(u"id"_s).toString());
+    return item;
+}
+
+QTreeWidgetItem* SubsonicBrowser::createAlbumItem(QTreeWidgetItem* parent, const QJsonObject& album)
+{
+    auto* child = new QTreeWidgetItem{parent};
+    child->setText(0, album.value(u"name"_s).toString());
+    child->setText(1, album.value(u"artist"_s).toString());
+    child->setText(2, QString::number(album.value(u"year"_s).toInt()));
+    child->setData(0, KindRole, Album);
+    child->setData(0, IdRole, album.value(u"id"_s).toString());
+    child->setData(0, CoverRole, album.value(u"coverArt"_s).toString());
+    applyCover(child, album.value(u"coverArt"_s).toString());
+    return child;
+}
+
+QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const QJsonObject& song)
+{
+    auto* child = new QTreeWidgetItem{parent};
+
+    const int trackNumber = song.value(u"track"_s).toInt();
+    const QString title   = song.value(u"title"_s).toString();
+    child->setText(0, trackNumber > 0 ? u"%1. %2"_s.arg(trackNumber, 2, 10, QLatin1Char{'0'}).arg(title)
+                                      : title);
+    child->setText(1, song.value(u"artist"_s).toString());
+    child->setText(2, song.value(u"album"_s).toString());
+
+    const int seconds = song.value(u"duration"_s).toInt();
+    if(seconds > 0) {
+        child->setText(3, u"%1:%2"_s.arg(seconds / 60).arg(seconds % 60, 2, 10, QLatin1Char{'0'}));
+    }
+
+    const qint64 size = songSize(song);
+    if(size > 0) {
+        child->setText(4, formatBytes(size));
+    }
+
+    qCInfo(SUBSONIC) << "Track:" << title << "artist=" << song.value(u"artist"_s).toString()
+                     << "size=" << size << "bytes" << "duration=" << seconds << "s"
+                     << "bitrate=" << song.value(u"bitRate"_s).toInt() << "kbps"
+                     << "codec=" << song.value(u"suffix"_s).toString();
+
+    child->setData(0, KindRole, Song);
+    child->setData(0, IdRole, song.value(u"id"_s).toString());
+    child->setData(0, JsonRole, song);
+    child->setData(0, CoverRole, song.value(u"coverArt"_s).toString());
+    applyCover(child, song.value(u"coverArt"_s).toString());
+    child->setText(5, cacheText(song.value(u"id"_s).toString()));
+    return child;
 }
 
 void SubsonicBrowser::addPlaceholder(QTreeWidgetItem* item)
@@ -417,6 +502,12 @@ void SubsonicBrowser::gatherTracks(const QList<QTreeWidgetItem*>& items, const s
             const QJsonObject song = item->data(0, JsonRole).toJsonObject();
             state->bytes += songSize(song);
             state->songs.push_back(song);
+        } else if(kind == ResultHeader) {
+            QList<QTreeWidgetItem*> children;
+            for(int i{0}; i < item->childCount(); ++i) {
+                children.push_back(item->child(i));
+            }
+            gatherTracks(children, state);
         } else if(kind == Artist || kind == Album) {
             if(item->data(0, LoadedRole).toBool()) {
                 QList<QTreeWidgetItem*> children;
@@ -631,24 +722,185 @@ QString SubsonicBrowser::cacheText(const QString& songId) const
     return {};
 }
 
-void SubsonicBrowser::updateCacheColumn(const QString& songId)
+void SubsonicBrowser::updateDownloadProgress()
 {
-    if(QTreeWidgetItem* item = findSongItem(songId)) {
-        item->setText(5, cacheText(songId));
-    }
-}
-
-QTreeWidgetItem* SubsonicBrowser::findSongItem(const QString& songId) const
-{
+    // ponytail: linear scan on every progress tick; switch to tracking just the active row if the tree
+    // ever holds thousands of songs.
     QTreeWidgetItemIterator it{m_tree};
     while(*it) {
         QTreeWidgetItem* item = *it;
-        if(item->data(0, KindRole).toInt() == Song && item->data(0, IdRole).toString() == songId) {
-            return item;
+        if(item->data(0, KindRole).toInt() == Song) {
+            const QString text = cacheText(item->data(0, IdRole).toString());
+            if(item->text(5) != text) {
+                item->setText(5, text);
+            }
         }
         ++it;
     }
-    return nullptr;
+}
+
+void SubsonicBrowser::applyCover(QTreeWidgetItem* item, const QString& coverArtId)
+{
+    if(!item || coverArtId.isEmpty()) {
+        return;
+    }
+
+    if(const auto cached = m_coverCache.constFind(coverArtId); cached != m_coverCache.constEnd()) {
+        item->setIcon(0, QIcon{cached.value()});
+        return;
+    }
+
+    requestCover(coverArtId);
+}
+
+void SubsonicBrowser::requestCover(const QString& coverArtId)
+{
+    if(m_coverRequests.contains(coverArtId)) {
+        return;
+    }
+    m_coverRequests.insert(coverArtId);
+
+    QNetworkReply* reply = m_network->get(QNetworkRequest{m_client->coverArtUrl(coverArtId, 64)});
+    connect(reply, &QNetworkReply::finished, this, [this, reply, coverArtId] {
+        reply->deleteLater();
+
+        if(reply->error() == QNetworkReply::NoError) {
+            QPixmap pixmap;
+            if(pixmap.loadFromData(reply->readAll())) {
+                m_coverCache.insert(coverArtId,
+                                    pixmap.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                applyCoverToTree(coverArtId);
+                // Bound memory; visible rows keep their already-set icons.
+                if(m_coverCache.size() > 1024) {
+                    m_coverCache.clear();
+                }
+                return;
+            }
+        }
+
+        // Allow a later refresh to retry a failed download.
+        m_coverRequests.remove(coverArtId);
+    });
+}
+
+void SubsonicBrowser::applyCoverToTree(const QString& coverArtId)
+{
+    const auto cached = m_coverCache.constFind(coverArtId);
+    if(cached == m_coverCache.constEnd()) {
+        return;
+    }
+
+    const QIcon icon{cached.value()};
+    QTreeWidgetItemIterator it{m_tree};
+    while(*it) {
+        QTreeWidgetItem* item = *it;
+        if(item->data(0, CoverRole).toString() == coverArtId) {
+            item->setIcon(0, icon);
+        }
+        ++it;
+    }
+}
+
+void SubsonicBrowser::applyFilter()
+{
+    if(m_applyingFilter) {
+        return;
+    }
+
+    m_applyingFilter = true;
+
+    if(m_filterText.isEmpty()) {
+        ++m_searchGeneration; // drop any in-flight search results
+        if(m_filterMode) {
+            m_filterMode = false;
+            rebuildArtistTree();
+        }
+    }
+    else {
+        m_filterMode         = true;
+        const int generation = ++m_searchGeneration;
+        setStatus(tr("Searching..."));
+        m_client->search(m_filterText, [this, generation](const QJsonObject& result, const QString& error) {
+            if(generation != m_searchGeneration) {
+                return;
+            }
+            if(!error.isEmpty()) {
+                setStatus(error);
+                return;
+            }
+            buildSearchTree(result);
+        });
+    }
+
+    m_applyingFilter = false;
+}
+
+void SubsonicBrowser::clearTree()
+{
+    // Invalidate any in-flight lazy loads so their callbacks don't touch deleted items.
+    ++m_treeGeneration;
+    m_pendingLoads.clear();
+    m_loading.clear();
+    m_tree->clear();
+}
+
+void SubsonicBrowser::rebuildArtistTree()
+{
+    clearTree();
+    for(const QJsonObject& artist : m_artists) {
+        auto* item = createArtistItem(artist);
+        addPlaceholder(item);
+    }
+    setStatus(tr("%1 artists").arg(m_artists.size()));
+}
+
+void SubsonicBrowser::buildSearchTree(const QJsonObject& result)
+{
+    clearTree();
+
+    const QJsonArray artists = asArray(result.value(u"artist"_s));
+    const QJsonArray albums  = asArray(result.value(u"album"_s));
+    const QJsonArray songs   = asArray(result.value(u"song"_s));
+
+    const auto addHeader = [this](const QString& title) {
+        auto* header = new QTreeWidgetItem{m_tree};
+        header->setText(0, title);
+        header->setData(0, KindRole, ResultHeader);
+        header->setFirstColumnSpanned(true);
+        QFont font = header->font(0);
+        font.setBold(true);
+        header->setFont(0, font);
+        header->setExpanded(true);
+        return header;
+    };
+
+    if(!artists.isEmpty()) {
+        auto* header = addHeader(tr("Artists (%1)").arg(artists.size()));
+        for(const QJsonValue& value : artists) {
+            addPlaceholder(createArtistItem(value.toObject(), header));
+        }
+    }
+
+    if(!albums.isEmpty()) {
+        auto* header = addHeader(tr("Albums (%1)").arg(albums.size()));
+        for(const QJsonValue& value : albums) {
+            addPlaceholder(createAlbumItem(header, value.toObject()));
+        }
+    }
+
+    if(!songs.isEmpty()) {
+        auto* header = addHeader(tr("Songs (%1)").arg(songs.size()));
+        for(const QJsonValue& value : songs) {
+            createSongItem(header, value.toObject());
+        }
+    }
+
+    if(artists.isEmpty() && albums.isEmpty() && songs.isEmpty()) {
+        setStatus(tr("No matches."));
+        return;
+    }
+
+    setStatus(tr("%1 result(s)").arg(artists.size() + albums.size() + songs.size()));
 }
 
 void SubsonicBrowser::setStatus(const QString& text)

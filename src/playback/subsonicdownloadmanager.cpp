@@ -10,6 +10,7 @@
 #include "subsonicsettings.h"
 #include "subsonictrack.h"
 
+#include <core/engine/audioloader.h>
 #include <core/network/networkaccessmanager.h>
 #include <core/player/playercontroller.h>
 #include <core/playlist/playlist.h>
@@ -43,9 +44,11 @@ constexpr uint64_t ResumeSeekThresholdMs = 1000;
 namespace Fooyin::Subsonic {
 SubsonicDownloadManager::SubsonicDownloadManager(std::shared_ptr<NetworkAccessManager> network,
                                                  SettingsManager* settings, PlayerController* player,
-                                                 PlaylistHandler* handler, QObject* parent)
+                                                 PlaylistHandler* handler, std::shared_ptr<AudioLoader> audioLoader,
+                                                 QObject* parent)
     : QObject{parent}
     , m_network{std::move(network)}
+    , m_audioLoader{std::move(audioLoader)}
     , m_settings{settings}
     , m_client{new SubsonicClient{m_network, loadSubsonicSettings(settings), this}}
     , m_player{player}
@@ -303,8 +306,33 @@ int SubsonicDownloadManager::registerRemoteTrack(const Track& track)
     if(!track.artists().empty()) {
         song[u"artist"_s] = track.artists().front();
     }
+    if(!track.albumArtists().empty()) {
+        song[u"albumArtist"_s] = track.albumArtists().front();
+    }
+    if(!track.genres().empty()) {
+        song[u"genre"_s] = track.genres().front();
+    }
+    if(track.trackNumber().toInt() > 0) {
+        song[u"track"_s] = track.trackNumber().toInt();
+    }
+    if(track.discNumber().toInt() > 0) {
+        song[u"discNumber"_s] = track.discNumber().toInt();
+    }
+    if(track.year() > 0) {
+        song[u"year"_s] = track.year();
+    }
+    if(track.bitrate() > 0) {
+        song[u"bitRate"_s] = track.bitrate();
+    }
     if(track.duration() > 0) {
         song[u"duration"_s] = static_cast<int>(track.duration() / 1000);
+    }
+    // Recover the Subsonic cover id from the track's artwork tag so the promoted local track keeps it.
+    if(const QStringList coverTags = track.extraTag(u"COVERART"_s); !coverTags.isEmpty()) {
+        if(const QString coverId = QUrlQuery{QUrl{coverTags.front()}}.queryItemValue(u"id"_s);
+           !coverId.isEmpty()) {
+            song[u"coverArt"_s] = coverId;
+        }
     }
 
     const QString path = pathForSong(song, m_dir);
@@ -563,7 +591,7 @@ void SubsonicDownloadManager::finishCurrent(bool ok)
         if(ok) {
             entry.done = true;
             qCInfo(SUBSONIC) << "Downloaded" << entry.path << m_received << "bytes";
-            promoteEntryToLocal(index);
+            embedCoverThenPromote(index);
             evictCacheIfNeeded();
         }
         else {
@@ -590,6 +618,48 @@ void SubsonicDownloadManager::finishCurrent(bool ok)
 
     Q_EMIT downloadProgressChanged();
     processNext();
+}
+
+void SubsonicDownloadManager::embedCoverThenPromote(int index)
+{
+    if(index < 0 || index >= static_cast<int>(m_entries.size()) || !m_audioLoader) {
+        promoteEntryToLocal(index);
+        return;
+    }
+
+    const QString coverArt = m_entries[index].song.value(u"coverArt"_s).toString();
+    if(coverArt.isEmpty()) {
+        promoteEntryToLocal(index);
+        return;
+    }
+
+    // fooyin resolves remote artwork (COVERART) only for remote tracks, so once the file is local its
+    // cover must be embedded in the file itself; otherwise players fall back to the "no cover" icon.
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    QNetworkReply* reply = m_network->get(QNetworkRequest{m_client->coverArtUrl(coverArt, 500)});
+    connect(reply, &QNetworkReply::finished, this, [this, index, reply] {
+        reply->deleteLater();
+
+        if(reply->error() == QNetworkReply::NoError && index >= 0
+           && index < static_cast<int>(m_entries.size())) {
+            const QByteArray data = reply->readAll();
+            const Track track     = trackForEntry(m_entries[index]);
+            // Keep any art the file already carries (e.g. a higher-resolution embedded cover).
+            if(!data.isEmpty() && m_audioLoader->readTrackCover(track, Track::Cover::Front).isEmpty()) {
+                QString mimeType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+                if(mimeType.isEmpty()) {
+                    mimeType = u"image/jpeg"_s;
+                }
+                TrackCovers covers;
+                covers[Track::Cover::Front] = CoverImage{mimeType, data};
+                if(!m_audioLoader->writeTrackCover(track, covers, {})) {
+                    qCWarning(SUBSONIC) << "Could not embed cover art in" << track.filepath();
+                }
+            }
+        }
+
+        promoteEntryToLocal(index);
+    });
 }
 
 void SubsonicDownloadManager::promoteEntryToLocal(int index)

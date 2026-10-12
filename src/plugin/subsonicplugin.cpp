@@ -36,7 +36,7 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
     registerSubsonicSettings(m_settings);
 
     m_downloads = new SubsonicDownloadManager{m_network, m_settings, context.playerController,
-                                              context.playlistHandler, this};
+                                              context.playlistHandler, context.audioLoader, this};
 
     // With the stock 2 MB read-ahead, fooyin throttles a remote file to playback speed, so the
     // HTTP connection stays open for the whole track. Servers/proxies in front of Subsonic

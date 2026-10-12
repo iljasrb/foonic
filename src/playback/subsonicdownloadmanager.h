@@ -22,6 +22,7 @@ class QFile;
 class QNetworkReply;
 
 namespace Fooyin {
+class AudioLoader;
 class NetworkAccessManager;
 class PlayerController;
 class PlaylistHandler;
@@ -53,7 +54,8 @@ public:
     Q_ENUM(CacheState)
 
     SubsonicDownloadManager(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
-                            PlayerController* player, PlaylistHandler* handler, QObject* parent = nullptr);
+                            PlayerController* player, PlaylistHandler* handler,
+                            std::shared_ptr<AudioLoader> audioLoader, QObject* parent = nullptr);
     ~SubsonicDownloadManager() override;
 
     /*!
@@ -100,6 +102,7 @@ private:
     void handleReadyRead();
     void handleFinished();
     void finishCurrent(bool ok);
+    void embedCoverThenPromote(int index);
     void promoteEntryToLocal(int index);
     void evictCacheIfNeeded();
     [[nodiscard]] Track trackForEntry(const Entry& entry) const;
@@ -109,6 +112,7 @@ private:
     [[nodiscard]] QString pathForSong(const QJsonObject& song, const QString& dir) const;
 
     std::shared_ptr<NetworkAccessManager> m_network;
+    std::shared_ptr<AudioLoader> m_audioLoader;
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     PlayerController* m_player;

@@ -95,7 +95,12 @@ private:
     void clearTree();
     void rebuildArtistTree();
     void addPlaylistsHeader();
+    void startPlaylistScan();
+    void pumpPlaylistScan();
+    void renderSearchView();
     void buildSearchTree(const QJsonObject& result);
+    QTreeWidgetItem* createResultHeader(const QString& title);
+    QTreeWidgetItem* createPlaylistItem(QTreeWidgetItem* parent, const QJsonObject& playlist);
     QTreeWidgetItem* createArtistItem(const QJsonObject& artist, QTreeWidgetItem* parent = nullptr);
     QTreeWidgetItem* createAlbumItem(QTreeWidgetItem* parent, const QJsonObject& album);
     QTreeWidgetItem* createSongItem(QTreeWidgetItem* parent, const QJsonObject& song);
@@ -117,6 +122,14 @@ private:
     QSet<QString> m_coverRequests;
     QList<QJsonObject> m_artists;
     QList<QJsonObject> m_playlists;
+    QHash<QString, QString> m_playlistSearchText;
+    QStringList m_playlistScanQueue;
+    int m_playlistScanToken{0};
+    int m_playlistScanActive{0};
+    int m_playlistScanTotal{0};
+    int m_playlistScanDone{0};
+    QJsonObject m_searchResult;
+    bool m_searchResultReady{false};
     QHash<QString, QJsonArray> m_albumsByArtist;
     QHash<QString, QJsonArray> m_songsByAlbum;
     int m_searchGeneration{0};

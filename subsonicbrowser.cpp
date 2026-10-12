@@ -57,6 +57,10 @@ enum ItemKind : uint8_t
     PlaylistNode = 5,
 };
 
+// Cap concurrent playlist-entry requests during a search scan so a large playlist library doesn't
+// flood the server.
+constexpr int MaxPlaylistFetches = 4;
+
 QJsonArray asArray(const QJsonValue& value)
 {
     if(value.isArray()) {
@@ -129,10 +133,8 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     m_tree->setIconSize(QSize{24, 24});
     m_tree->setAlternatingRowColors(true);
     m_tree->setRootIsDecorated(true);
-    m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    for(int column{1}; column < m_tree->columnCount(); ++column) {
-        m_tree->header()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
-    }
+    m_tree->header()->setSectionResizeMode(QHeaderView::Interactive);
+    m_tree->header()->setStretchLastSection(true);
     m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_tree->setDragEnabled(true);
     m_tree->setDragDropMode(QAbstractItemView::DragOnly);
@@ -197,6 +199,10 @@ void SubsonicBrowser::refresh()
     clearTree();
     m_artists.clear();
     m_playlists.clear();
+    m_playlistSearchText.clear();
+    m_playlistScanQueue.clear();
+    ++m_playlistScanToken; // cancel any scan still in flight
+    m_searchResultReady = false;
     m_albumsByArtist.clear();
     m_songsByAlbum.clear();
     m_filterMode = false;
@@ -223,7 +229,10 @@ void SubsonicBrowser::refresh()
         for(const QJsonValue& value : playlists) {
             m_playlists.push_back(value.toObject());
         }
-        if(!m_filterMode) {
+        if(m_filterMode) {
+            startPlaylistScan();
+        }
+        else {
             addPlaylistsHeader();
         }
     });
@@ -401,7 +410,7 @@ void SubsonicBrowser::loadChildren(QTreeWidgetItem* item, int kind, const QStrin
         m_client->getArtist(id, callback);
     }
     else if(kind == PlaylistNode) {
-        // Not cached: playlists change server-side. Expanded children still persist until Refresh.
+        // Playlists change server-side; fetch fresh on expand.
         m_client->getPlaylist(id, callback);
     }
     else {
@@ -845,6 +854,8 @@ void SubsonicBrowser::applyFilter()
 
     if(m_filterText.isEmpty()) {
         ++m_searchGeneration; // drop any in-flight search results
+        ++m_playlistScanToken;
+        m_playlistScanQueue.clear();
         if(m_filterMode) {
             m_filterMode = false;
             rebuildArtistTree();
@@ -853,7 +864,9 @@ void SubsonicBrowser::applyFilter()
     else {
         m_filterMode         = true;
         const int generation = ++m_searchGeneration;
+        m_searchResultReady  = false;
         setStatus(tr("Searching..."));
+        startPlaylistScan();
         m_client->search(m_filterText, [this, generation](const QJsonObject& result, const QString& error) {
             if(generation != m_searchGeneration) {
                 return;
@@ -862,7 +875,9 @@ void SubsonicBrowser::applyFilter()
                 setStatus(error);
                 return;
             }
-            buildSearchTree(result);
+            m_searchResult      = result;
+            m_searchResultReady = true;
+            renderSearchView();
         });
     }
 
@@ -889,31 +904,98 @@ void SubsonicBrowser::rebuildArtistTree()
     setStatus(tr("%1 artists").arg(m_artists.size()));
 }
 
+QTreeWidgetItem* SubsonicBrowser::createResultHeader(const QString& title)
+{
+    auto* header = new QTreeWidgetItem;
+    header->setText(0, title);
+    header->setData(0, KindRole, ResultHeader);
+    header->setFirstColumnSpanned(true);
+    QFont font = header->font(0);
+    font.setBold(true);
+    header->setFont(0, font);
+    header->setExpanded(true);
+    return header;
+}
+
+QTreeWidgetItem* SubsonicBrowser::createPlaylistItem(QTreeWidgetItem* parent, const QJsonObject& playlist)
+{
+    auto* item = new QTreeWidgetItem{parent};
+    item->setText(0, playlist.value(u"name"_s).toString());
+    item->setText(1, playlist.value(u"owner"_s).toString());
+    item->setText(2, tr("%1 songs").arg(playlist.value(u"songCount"_s).toInt()));
+    item->setData(0, KindRole, PlaylistNode);
+    item->setData(0, IdRole, playlist.value(u"id"_s).toString());
+    item->setData(0, CoverRole, playlist.value(u"coverArt"_s).toString());
+    applyCover(item, playlist.value(u"coverArt"_s).toString());
+    addPlaceholder(item);
+    return item;
+}
+
 void SubsonicBrowser::addPlaylistsHeader()
 {
     if(m_playlists.isEmpty()) {
         return;
     }
 
-    auto* header = new QTreeWidgetItem;
+    auto* header = createResultHeader(tr("Playlists (%1)").arg(m_playlists.size()));
     m_tree->insertTopLevelItem(0, header);
-    header->setText(0, tr("Playlists (%1)").arg(m_playlists.size()));
-    header->setData(0, KindRole, ResultHeader);
-    header->setFirstColumnSpanned(true);
-    QFont font = header->font(0);
-    font.setBold(true);
-    header->setFont(0, font);
-
     for(const QJsonObject& playlist : m_playlists) {
-        auto* item = new QTreeWidgetItem{header};
-        item->setText(0, playlist.value(u"name"_s).toString());
-        item->setText(1, playlist.value(u"owner"_s).toString());
-        item->setText(2, tr("%1 songs").arg(playlist.value(u"songCount"_s).toInt()));
-        item->setData(0, KindRole, PlaylistNode);
-        item->setData(0, IdRole, playlist.value(u"id"_s).toString());
-        item->setData(0, CoverRole, playlist.value(u"coverArt"_s).toString());
-        applyCover(item, playlist.value(u"coverArt"_s).toString());
-        addPlaceholder(item);
+        createPlaylistItem(header, playlist);
+    }
+}
+
+void SubsonicBrowser::startPlaylistScan()
+{
+    ++m_playlistScanToken; // cancel any in-flight scan; its callbacks will be ignored
+    m_playlistScanQueue.clear();
+    m_playlistScanDone = 0;
+    for(const QJsonObject& playlist : m_playlists) {
+        const QString id = playlist.value(u"id"_s).toString();
+        if(!m_playlistSearchText.contains(id)) {
+            m_playlistScanQueue.push_back(id);
+        }
+    }
+    m_playlistScanTotal = m_playlistScanQueue.size();
+    pumpPlaylistScan();
+}
+
+void SubsonicBrowser::pumpPlaylistScan()
+{
+    while(m_playlistScanActive < MaxPlaylistFetches && !m_playlistScanQueue.isEmpty()) {
+        const int token  = m_playlistScanToken;
+        const QString id = m_playlistScanQueue.takeFirst();
+        ++m_playlistScanActive;
+        m_client->getPlaylist(id, [this, token, id](const QJsonObject& object, const QString& error) {
+            --m_playlistScanActive;
+            if(token == m_playlistScanToken) {
+                // Keep only the searchable text, not full entries, so a large playlist library
+                // doesn't pin hundreds of track objects in memory.
+                QString text;
+                if(error.isEmpty()) {
+                    for(const QJsonValue& entry : asArray(object.value(u"entry"_s))) {
+                        const QJsonObject song = entry.toObject();
+                        text += song.value(u"title"_s).toString() + u' '
+                              + song.value(u"artist"_s).toString() + u' '
+                              + song.value(u"album"_s).toString() + u'\n';
+                    }
+                }
+                m_playlistSearchText.insert(id, text);
+                ++m_playlistScanDone;
+                setStatus(tr("Searching playlists (%1/%2)...").arg(m_playlistScanDone).arg(m_playlistScanTotal));
+            }
+            pumpPlaylistScan();
+        });
+    }
+
+    if(m_playlistScanActive == 0 && m_playlistScanQueue.isEmpty()) {
+        renderSearchView(); // scan finished: show any track matches
+    }
+}
+
+void SubsonicBrowser::renderSearchView()
+{
+    if(m_searchResultReady && m_filterMode) {
+        buildSearchTree(m_searchResult);
     }
 }
 
@@ -925,45 +1007,55 @@ void SubsonicBrowser::buildSearchTree(const QJsonObject& result)
     const QJsonArray albums  = asArray(result.value(u"album"_s));
     const QJsonArray songs   = asArray(result.value(u"song"_s));
 
-    const auto addHeader = [this](const QString& title) {
-        auto* header = new QTreeWidgetItem{m_tree};
-        header->setText(0, title);
-        header->setData(0, KindRole, ResultHeader);
-        header->setFirstColumnSpanned(true);
-        QFont font = header->font(0);
-        font.setBold(true);
-        header->setFont(0, font);
-        header->setExpanded(true);
-        return header;
-    };
+    // Playlists aren't part of search3, so match them locally by name or by any track they hold.
+    QList<QJsonObject> playlistMatches;
+    for(const QJsonObject& playlist : m_playlists) {
+        const QString id = playlist.value(u"id"_s).toString();
+        if(playlist.value(u"name"_s).toString().contains(m_filterText, Qt::CaseInsensitive)
+           || m_playlistSearchText.value(id).contains(m_filterText, Qt::CaseInsensitive)) {
+            playlistMatches.push_back(playlist);
+        }
+    }
+
+    if(!playlistMatches.isEmpty()) {
+        auto* header = createResultHeader(tr("Playlists (%1)").arg(playlistMatches.size()));
+        m_tree->addTopLevelItem(header);
+        for(const QJsonObject& playlist : playlistMatches) {
+            createPlaylistItem(header, playlist);
+        }
+    }
 
     if(!artists.isEmpty()) {
-        auto* header = addHeader(tr("Artists (%1)").arg(artists.size()));
+        auto* header = createResultHeader(tr("Artists (%1)").arg(artists.size()));
+        m_tree->addTopLevelItem(header);
         for(const QJsonValue& value : artists) {
             addPlaceholder(createArtistItem(value.toObject(), header));
         }
     }
 
     if(!albums.isEmpty()) {
-        auto* header = addHeader(tr("Albums (%1)").arg(albums.size()));
+        auto* header = createResultHeader(tr("Albums (%1)").arg(albums.size()));
+        m_tree->addTopLevelItem(header);
         for(const QJsonValue& value : albums) {
             addPlaceholder(createAlbumItem(header, value.toObject()));
         }
     }
 
     if(!songs.isEmpty()) {
-        auto* header = addHeader(tr("Songs (%1)").arg(songs.size()));
+        auto* header = createResultHeader(tr("Songs (%1)").arg(songs.size()));
+        m_tree->addTopLevelItem(header);
         for(const QJsonValue& value : songs) {
             createSongItem(header, value.toObject());
         }
     }
 
-    if(artists.isEmpty() && albums.isEmpty() && songs.isEmpty()) {
+    const int total = artists.size() + albums.size() + songs.size() + playlistMatches.size();
+    if(total == 0) {
         setStatus(tr("No matches."));
         return;
     }
 
-    setStatus(tr("%1 result(s)").arg(artists.size() + albums.size() + songs.size()));
+    setStatus(tr("%1 result(s)").arg(total));
 }
 
 void SubsonicBrowser::setStatus(const QString& text)

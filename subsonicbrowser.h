@@ -27,6 +27,7 @@
 class QLabel;
 class QLineEdit;
 class QTimer;
+class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -45,6 +46,13 @@ enum class BrowserAction : uint8_t
     AddToPlaylist,
     PlayNext,
     AddToQueue,
+};
+
+enum class MatchMode
+{
+    Contains = 0,
+    AllWords,
+    AnyWord,
 };
 
 /*!
@@ -77,6 +85,7 @@ private:
     bool ensureDragData(const QList<QTreeWidgetItem*>& items);
     void cancelDragFetch();
     void showContextMenu(const QPoint& pos);
+    void showHeaderMenu(const QPoint& pos);
     void playSelection(BrowserAction action);
 
     void loadChildren(QTreeWidgetItem* item, int kind, const QString& id, std::function<void()> onDone = {},
@@ -116,8 +125,14 @@ private:
     QLabel* m_status;
     QTreeWidget* m_tree;
     QLineEdit* m_filter{nullptr};
+    QToolButton* m_filterOptions{nullptr};
     QTimer* m_filterTimer{nullptr};
     QString m_filterText;
+    bool m_searchArtists{true};
+    bool m_searchAlbums{true};
+    bool m_searchSongs{true};
+    bool m_searchPlaylists{true};
+    MatchMode m_matchMode{MatchMode::Contains};
     std::map<QTreeWidgetItem*, std::vector<std::function<void()>>> m_pendingLoads;
     std::set<QTreeWidgetItem*> m_loading;
     QHash<QString, QPixmap> m_coverCache;

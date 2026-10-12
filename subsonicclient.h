@@ -41,7 +41,7 @@ public:
     void getPlaylists(ArrayCallback callback);
     void getPlaylist(const QString& id, ObjectCallback callback);
     /*! Searches artists/albums/songs server-side (search3, falling back to search2). */
-    void search(const QString& query, SearchCallback callback);
+    void search(const QString& query, int artistCount, int albumCount, int songCount, SearchCallback callback);
     void ping(std::function<void(const QString& error)> callback);
 
     [[nodiscard]] QUrl streamUrl(const QString& id) const;

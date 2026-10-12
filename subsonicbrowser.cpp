@@ -19,6 +19,7 @@
 #include <utils/id.h>
 #include <utils/settings/settingsdialogcontroller.h>
 
+#include <QActionGroup>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -34,6 +35,7 @@
 #include <QPushButton>
 #include <QStringList>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QTreeWidgetItemIterator>
@@ -76,6 +78,171 @@ QJsonArray asArray(const QJsonValue& value)
 qint64 songSize(const QJsonObject& song)
 {
     return static_cast<qint64>(song.value(u"size"_s).toDouble());
+}
+
+struct FilterTerm
+{
+    QString field; // empty = match any field
+    QString value;
+    bool negated{false};
+};
+
+// Splits the filter into field-scoped/negated terms. In Contains mode, plain words are joined back
+// into one phrase so they must appear together; in the word modes they stay separate.
+QList<FilterTerm> parseFilter(const QString& text, Fooyin::Subsonic::MatchMode mode)
+{
+    static const QSet<QString> knownFields
+        = {u"artist"_s, u"album"_s, u"title"_s, u"genre"_s, u"playlist"_s, u"year"_s};
+
+    QStringList words;
+    QString current;
+    bool inQuotes{false};
+    for(const QChar ch : text) {
+        if(ch == u'"') {
+            inQuotes = !inQuotes;
+            continue;
+        }
+        if(ch.isSpace() && !inQuotes) {
+            if(!current.isEmpty()) {
+                words.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+        current += ch;
+    }
+    if(!current.isEmpty()) {
+        words.push_back(current);
+    }
+
+    QList<FilterTerm> terms;
+    QString barePhrase;
+    for(QString word : words) {
+        FilterTerm term;
+        if(word.size() > 1 && word.startsWith(u'-')) {
+            term.negated = true;
+            word.remove(0, 1);
+        }
+        const int colon = word.indexOf(u':');
+        if(colon > 0) {
+            const QString field = word.left(colon).toLower();
+            if(knownFields.contains(field)) {
+                term.field = field;
+                word       = word.mid(colon + 1);
+            }
+        }
+        if(word.isEmpty()) {
+            continue;
+        }
+        if(mode == Fooyin::Subsonic::MatchMode::Contains && !term.negated && term.field.isEmpty()) {
+            if(!barePhrase.isEmpty()) {
+                barePhrase += u' ';
+            }
+            barePhrase += word;
+            continue;
+        }
+        term.value = word;
+        terms.push_back(term);
+    }
+    if(!barePhrase.isEmpty()) {
+        FilterTerm phrase;
+        phrase.value = barePhrase;
+        terms.push_front(phrase);
+    }
+    return terms;
+}
+
+QString serverQueryFor(const QList<FilterTerm>& terms)
+{
+    QStringList parts;
+    for(const FilterTerm& term : terms) {
+        if(!term.negated && !term.value.isEmpty()) {
+            parts.push_back(term.value);
+        }
+    }
+    return parts.join(u' ');
+}
+
+bool termMatches(const FilterTerm& term, const QHash<QString, QString>& fields)
+{
+    if(term.field.isEmpty()) {
+        for(const QString& value : fields) {
+            if(value.contains(term.value, Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return fields.value(term.field).contains(term.value, Qt::CaseInsensitive);
+}
+
+bool matchesFilter(const QList<FilterTerm>& terms, Fooyin::Subsonic::MatchMode mode,
+                   const QHash<QString, QString>& fields)
+{
+    if(terms.isEmpty()) {
+        return true;
+    }
+    bool anyPositive{false};
+    bool positive{mode != Fooyin::Subsonic::MatchMode::AnyWord}; // AND starts true, OR starts false
+    for(const FilterTerm& term : terms) {
+        const bool matched = termMatches(term, fields);
+        if(term.negated) {
+            if(matched) {
+                return false;
+            }
+            continue;
+        }
+        anyPositive = true;
+        positive    = (mode == Fooyin::Subsonic::MatchMode::AnyWord) ? (positive || matched) : (positive && matched);
+    }
+    return anyPositive ? positive : true;
+}
+
+QHash<QString, QString> artistFields(const QJsonObject& artist)
+{
+    return {{u"artist"_s, artist.value(u"name"_s).toString()}};
+}
+
+QHash<QString, QString> albumFields(const QJsonObject& album)
+{
+    return {{u"album"_s, album.value(u"name"_s).toString()}, {u"artist"_s, album.value(u"artist"_s).toString()}};
+}
+
+QHash<QString, QString> songFields(const QJsonObject& song)
+{
+    QHash<QString, QString> fields;
+    fields[u"title"_s]  = song.value(u"title"_s).toString();
+    fields[u"artist"_s] = song.value(u"artist"_s).toString();
+    fields[u"album"_s]  = song.value(u"album"_s).toString();
+    fields[u"genre"_s]  = song.value(u"genre"_s).toString();
+    fields[u"year"_s]   = QString::number(song.value(u"year"_s).toInt());
+    return fields;
+}
+
+QHash<QString, QString> playlistFields(const QJsonObject& playlist, const QJsonArray& entries)
+{
+    QHash<QString, QString> fields;
+    fields[u"playlist"_s] = playlist.value(u"name"_s).toString();
+
+    QString titles;
+    QString artists;
+    QString albums;
+    for(const QJsonValue& value : entries) {
+        const QJsonObject entry = value.toObject();
+        titles += entry.value(u"title"_s).toString() + u' ';
+        artists += entry.value(u"artist"_s).toString() + u' ';
+        albums += entry.value(u"album"_s).toString() + u' ';
+    }
+    if(!titles.isEmpty()) {
+        fields[u"title"_s] = titles;
+    }
+    if(!artists.isEmpty()) {
+        fields[u"artist"_s] = artists;
+    }
+    if(!albums.isEmpty()) {
+        fields[u"album"_s] = albums;
+    }
+    return fields;
 }
 
 class SubsonicTreeWidget : public QTreeWidget
@@ -162,6 +329,47 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     m_filter->setClearButtonEnabled(true);
     m_filter->setMaximumWidth(220);
 
+    m_filterOptions = new QToolButton{this};
+    m_filterOptions->setPopupMode(QToolButton::InstantPopup);
+    m_filterOptions->setText(tr("Filter options"));
+    m_filterOptions->setToolTip(tr("Search scope and matching.\n"
+                                   "Fields: artist: album: title: genre: playlist: year:\n"
+                                   "Prefix a term with '-' to exclude it."));
+
+    auto* filterMenu = new QMenu{m_filterOptions};
+    filterMenu->addSection(tr("Search in"));
+    const auto addScope = [this, filterMenu](const QString& text, bool& flag) {
+        auto* action = filterMenu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(flag);
+        connect(action, &QAction::toggled, this, [this, flagPtr = &flag](bool on) {
+            *flagPtr = on;
+            applyFilter();
+        });
+    };
+    addScope(tr("Artists"), m_searchArtists);
+    addScope(tr("Albums"), m_searchAlbums);
+    addScope(tr("Songs"), m_searchSongs);
+    addScope(tr("Playlists"), m_searchPlaylists);
+
+    filterMenu->addSection(tr("Match"));
+    auto* matchGroup = new QActionGroup{filterMenu};
+    matchGroup->setExclusive(true);
+    const auto addMatch = [this, filterMenu, matchGroup](const QString& text, MatchMode mode) {
+        auto* action = filterMenu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(m_matchMode == mode);
+        matchGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode] {
+            m_matchMode = mode;
+            applyFilter();
+        });
+    };
+    addMatch(tr("Contains"), MatchMode::Contains);
+    addMatch(tr("All words"), MatchMode::AllWords);
+    addMatch(tr("Any word"), MatchMode::AnyWord);
+    m_filterOptions->setMenu(filterMenu);
+
     m_filterTimer = new QTimer{this};
     m_filterTimer->setSingleShot(true);
     m_filterTimer->setInterval(150);
@@ -169,6 +377,7 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     auto* toolbar = new QHBoxLayout;
     toolbar->addWidget(refreshButton);
     toolbar->addWidget(m_status, 1);
+    toolbar->addWidget(m_filterOptions);
     toolbar->addWidget(m_filter);
 
     m_tree->setHeaderLabels({tr("Name"), tr("Artist"), tr("Album"), tr("Length"), tr("Size"), tr("Cache")});
@@ -213,6 +422,8 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
 
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &SubsonicBrowser::showContextMenu);
+    m_tree->header()->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tree->header(), &QWidget::customContextMenuRequested, this, &SubsonicBrowser::showHeaderMenu);
 
     if(m_downloads) {
         connect(m_downloads, &SubsonicDownloadManager::downloadProgressChanged, this,
@@ -903,6 +1114,42 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     }
 }
 
+void SubsonicBrowser::showHeaderMenu(const QPoint& pos)
+{
+    auto* header = m_tree->header();
+
+    QMenu menu{this};
+    auto* showAll = menu.addAction(tr("Show all columns"));
+    menu.addSeparator();
+
+    for(int column{0}; column < m_tree->columnCount(); ++column) {
+        auto* action = menu.addAction(m_tree->headerItem()->text(column));
+        action->setCheckable(true);
+        action->setChecked(!m_tree->isColumnHidden(column));
+        connect(action, &QAction::toggled, this, [this, column, action](bool visible) {
+            if(!visible) {
+                int visibleCount{0};
+                for(int i{0}; i < m_tree->columnCount(); ++i) {
+                    if(!m_tree->isColumnHidden(i)) {
+                        ++visibleCount;
+                    }
+                }
+                if(visibleCount <= 1) {
+                    action->setChecked(true); // never hide the last visible column
+                    return;
+                }
+            }
+            m_tree->setColumnHidden(column, !visible);
+        });
+    }
+
+    if(menu.exec(header->viewport()->mapToGlobal(pos)) == showAll) {
+        for(int column{0}; column < m_tree->columnCount(); ++column) {
+            m_tree->setColumnHidden(column, false);
+        }
+    }
+}
+
 void SubsonicBrowser::playSelection(BrowserAction action)
 {
     const QList<QTreeWidgetItem*> selected = m_tree->selectedItems();
@@ -1043,19 +1290,33 @@ void SubsonicBrowser::applyFilter()
         const int generation = ++m_searchGeneration;
         m_searchResultReady  = false;
         setStatus(tr("Searching..."));
-        startPlaylistScan();
-        m_client->search(m_filterText, [this, generation](const QJsonObject& result, const QString& error) {
-            if(generation != m_searchGeneration) {
-                return;
-            }
-            if(!error.isEmpty()) {
-                setStatus(error);
-                return;
-            }
-            m_searchResult      = result;
+
+        const QString query = serverQueryFor(parseFilter(m_filterText, m_matchMode));
+        if(m_searchPlaylists) {
+            startPlaylistScan();
+        }
+
+        if(query.isEmpty()) {
+            // Only exclusions / nothing searchable server-side: render from local data only.
+            m_searchResult      = {};
             m_searchResultReady = true;
             renderSearchView();
-        });
+        }
+        else {
+            m_client->search(query, m_searchArtists ? 30 : 0, m_searchAlbums ? 30 : 0, m_searchSongs ? 60 : 0,
+                             [this, generation](const QJsonObject& result, const QString& error) {
+                                 if(generation != m_searchGeneration) {
+                                     return;
+                                 }
+                                 if(!error.isEmpty()) {
+                                     setStatus(error);
+                                     return;
+                                 }
+                                 m_searchResult      = result;
+                                 m_searchResultReady = true;
+                                 renderSearchView();
+                             });
+        }
     }
 
     m_applyingFilter = false;
@@ -1171,64 +1432,89 @@ void SubsonicBrowser::buildSearchTree(const QJsonObject& result)
 {
     clearTree();
 
-    const QJsonArray artists = asArray(result.value(u"artist"_s));
-    const QJsonArray albums  = asArray(result.value(u"album"_s));
-    const QJsonArray songs   = asArray(result.value(u"song"_s));
+    const QList<FilterTerm> terms = parseFilter(m_filterText, m_matchMode);
 
-    // Playlists aren't part of search3, so match them locally by name or by any track they hold.
+    // Plain "contains" searches keep the server's own matching; once the user picks a word mode or
+    // uses field:/negation syntax we re-filter the server results ourselves.
+    bool precise = m_matchMode != MatchMode::Contains;
+    for(const FilterTerm& term : terms) {
+        if(term.negated || !term.field.isEmpty()) {
+            precise = true;
+            break;
+        }
+    }
+
+    const auto filterArray = [&terms, this](
+                                 const QJsonArray& array,
+                                 const std::function<QHash<QString, QString>(const QJsonObject&)>& fieldsFn) {
+        QJsonArray out;
+        for(const QJsonValue& value : array) {
+            const QJsonObject object = value.toObject();
+            if(matchesFilter(terms, m_matchMode, fieldsFn(object))) {
+                out.append(object);
+            }
+        }
+        return out;
+    };
+
+    // search3 does its own (server-specific) matching, so re-filter its results so the chosen match
+    // mode and any field:/negation syntax are actually honoured.
+    QJsonArray artists = asArray(result.value(u"artist"_s));
+    QJsonArray albums  = asArray(result.value(u"album"_s));
+    QJsonArray songs   = asArray(result.value(u"song"_s));
+    if(precise) {
+        artists = filterArray(artists, artistFields);
+        albums  = filterArray(albums, albumFields);
+        songs   = filterArray(songs, songFields);
+    }
+
+    // Playlists aren't part of search3, so match them locally against their name and cached tracks.
     QList<QJsonObject> playlistMatches;
     for(const QJsonObject& playlist : m_playlists) {
         const QString id = playlist.value(u"id"_s).toString();
-        bool matches     = playlist.value(u"name"_s).toString().contains(m_filterText, Qt::CaseInsensitive);
-        if(!matches) {
-            for(const QJsonValue& entry : m_playlistEntries.value(id)) {
-                const QJsonObject song = entry.toObject();
-                if(song.value(u"title"_s).toString().contains(m_filterText, Qt::CaseInsensitive)
-                   || song.value(u"artist"_s).toString().contains(m_filterText, Qt::CaseInsensitive)
-                   || song.value(u"album"_s).toString().contains(m_filterText, Qt::CaseInsensitive)) {
-                    matches = true;
-                    break;
-                }
-            }
-        }
-        if(matches) {
+        if(matchesFilter(terms, m_matchMode, playlistFields(playlist, m_playlistEntries.value(id)))) {
             playlistMatches.push_back(playlist);
         }
     }
 
-    if(!playlistMatches.isEmpty()) {
+    int total{0};
+
+    if(m_searchPlaylists && !playlistMatches.isEmpty()) {
         auto* header = createResultHeader(tr("Playlists (%1)").arg(playlistMatches.size()));
         m_tree->addTopLevelItem(header);
         for(const QJsonObject& playlist : playlistMatches) {
             createPlaylistItem(header, playlist);
         }
+        total += playlistMatches.size();
     }
 
-    if(!artists.isEmpty()) {
+    if(m_searchArtists && !artists.isEmpty()) {
         auto* header = createResultHeader(tr("Artists (%1)").arg(artists.size()));
         m_tree->addTopLevelItem(header);
         for(const QJsonValue& value : artists) {
             addPlaceholder(createArtistItem(value.toObject(), header));
         }
+        total += artists.size();
     }
 
-    if(!albums.isEmpty()) {
+    if(m_searchAlbums && !albums.isEmpty()) {
         auto* header = createResultHeader(tr("Albums (%1)").arg(albums.size()));
         m_tree->addTopLevelItem(header);
         for(const QJsonValue& value : albums) {
             addPlaceholder(createAlbumItem(header, value.toObject()));
         }
+        total += albums.size();
     }
 
-    if(!songs.isEmpty()) {
+    if(m_searchSongs && !songs.isEmpty()) {
         auto* header = createResultHeader(tr("Songs (%1)").arg(songs.size()));
         m_tree->addTopLevelItem(header);
         for(const QJsonValue& value : songs) {
             createSongItem(header, value.toObject());
         }
+        total += songs.size();
     }
 
-    const int total = artists.size() + albums.size() + songs.size() + playlistMatches.size();
     if(total == 0) {
         setStatus(tr("No matches."));
         return;

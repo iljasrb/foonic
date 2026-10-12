@@ -118,14 +118,15 @@ void SubsonicClient::ping(std::function<void(const QString& error)> callback)
     });
 }
 
-void SubsonicClient::search(const QString& query, SearchCallback callback)
+void SubsonicClient::search(const QString& query, int artistCount, int albumCount, int songCount,
+                            SearchCallback callback)
 {
-    const auto makeQuery = [query] {
+    const auto makeQuery = [query, artistCount, albumCount, songCount] {
         QUrlQuery q;
         q.addQueryItem(u"query"_s, query);
-        q.addQueryItem(u"artistCount"_s, u"30"_s);
-        q.addQueryItem(u"albumCount"_s, u"30"_s);
-        q.addQueryItem(u"songCount"_s, u"60"_s);
+        q.addQueryItem(u"artistCount"_s, QString::number(artistCount));
+        q.addQueryItem(u"albumCount"_s, QString::number(albumCount));
+        q.addQueryItem(u"songCount"_s, QString::number(songCount));
         return q;
     };
 

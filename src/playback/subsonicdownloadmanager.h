@@ -11,6 +11,7 @@
 #include <QList>
 #include <QObject>
 #include <QStringList>
+#include <QVariant>
 
 #include <functional>
 #include <map>
@@ -20,6 +21,7 @@
 
 class QFile;
 class QNetworkReply;
+class QTimer;
 
 namespace Fooyin {
 class AudioLoader;
@@ -118,6 +120,10 @@ private:
     void finishCurrent(bool ok);
     void embedCoverThenPromote(int index);
     void promoteEntryToLocal(int index);
+    void promoteAtQuietPoint(const Track& localTrack, const QString& remoteUrl, uint64_t position,
+                             std::function<void()> afterCommit);
+    void findQuietPoint(const Track& track, uint64_t startMs, std::function<void(uint64_t)> done);
+    void enableCrossfadeForSwitch();
     void evictCacheIfNeeded();
     [[nodiscard]] Track trackForEntry(const Entry& entry) const;
     [[nodiscard]] int indexForPath(const QString& path) const;
@@ -142,6 +148,7 @@ private:
     int m_gateIndex{-1};
     bool m_cancelActive{false};
     uint64_t m_pendingSeekPosition{0};
+    qint64 m_pendingSeekBaseMs{0};
     QString m_pendingSeekPath;
 
     QFile* m_file{nullptr};
@@ -153,6 +160,13 @@ private:
     bool m_rangeChecked{false};
     bool m_sentRange{false};
     qint64 m_lastProgressEmit{0};
+    int m_promoteToken{0};
+    // fooyin's manual-change crossfade is gated on Engine/Crossfading (default off); enable it just
+    // around a cache switch and restore the user's value afterwards.
+    QTimer* m_crossfadeRestoreTimer{nullptr};
+    bool m_crossfadeRestore{false};
+    bool m_crossfadeWasEnabled{false};
+    QVariant m_crossfadingValuesRestore;
 };
 } // namespace Subsonic
 } // namespace Fooyin

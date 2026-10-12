@@ -11,6 +11,7 @@
 #include "subsonictrack.h"
 
 #include <core/engine/audioloader.h>
+#include <core/engine/fadingdefs.h>
 #include <core/network/networkaccessmanager.h>
 #include <core/player/playercontroller.h>
 #include <core/playlist/playlist.h>
@@ -21,14 +22,18 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QMetaObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QUrlQuery>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <utility>
 
 using namespace Qt::StringLiterals;
@@ -39,6 +44,93 @@ constexpr int RetryDelayMs = 750;
 constexpr qint64 ProgressEmitIntervalMs = 250;
 // Restarting this close to the start of a track is effectively inaudible, so we can skip the seek.
 constexpr uint64_t ResumeSeekThresholdMs = 1000;
+// A live switch close to the end would interrupt the track for no real benefit; let it finish and use
+// the local copy from the next play onward.
+constexpr uint64_t NearEndSkipMs = 10000;
+// The seek command is dispatched to the engine thread, which runs a few ms behind the position we
+// captured; nudge the restore point forward by that latency so the seekbar doesn't visibly step back.
+constexpr uint64_t SeekDispatchMarginMs = 15;
+
+// Quiet-point handoff: scan this far ahead of the current position for a low-energy moment.
+constexpr int QuietHopMs      = 40;
+constexpr int QuietLookaheadMs = 6000;
+constexpr double QuietRmsThreshold = 0.03; // ~ -30 dBFS
+
+// Root-mean-square of an interleaved PCM buffer (linear, 0..1). Returns 1.0 when the format is unknown.
+double bufferRms(const Fooyin::AudioBuffer& buffer)
+{
+    const Fooyin::AudioFormat format = buffer.format();
+    const int bytesPerSample          = format.bytesPerSample();
+    const int sampleCount             = buffer.sampleCount();
+    const std::byte* data             = buffer.data();
+    if(!data || sampleCount <= 0 || bytesPerSample <= 0) {
+        return 1.0;
+    }
+
+    double sum{0};
+    long count{0};
+    const Fooyin::SampleFormat sampleFormat = format.sampleFormat();
+    for(int i{0}; i < sampleCount; ++i) {
+        const std::byte* p = data + static_cast<size_t>(i) * static_cast<size_t>(bytesPerSample);
+        double value{0};
+        switch(sampleFormat) {
+            case(Fooyin::SampleFormat::S16):
+                value = *reinterpret_cast<const int16_t*>(p) / 32768.0;
+                break;
+            case(Fooyin::SampleFormat::S32):
+            case(Fooyin::SampleFormat::S24In32):
+                value = *reinterpret_cast<const int32_t*>(p) / 2147483648.0;
+                break;
+            case(Fooyin::SampleFormat::F32):
+                value = *reinterpret_cast<const float*>(p);
+                break;
+            case(Fooyin::SampleFormat::F64):
+                value = *reinterpret_cast<const double*>(p);
+                break;
+            case(Fooyin::SampleFormat::U8):
+                value = (*reinterpret_cast<const uint8_t*>(p) - 128) / 128.0;
+                break;
+            default:
+                return 1.0;
+        }
+        sum += value * value;
+        ++count;
+    }
+    return count > 0 ? std::sqrt(sum / static_cast<double>(count)) : 1.0;
+}
+
+// Returns the first low-energy timestamp at/after @p startMs, or 0 if none is found in the window.
+uint64_t decodeQuietPoint(const Fooyin::LoadedDecoder& loaded, uint64_t startMs)
+{
+    const Fooyin::AudioFormat format = *loaded.format;
+    Fooyin::AudioDecoder* decoder    = loaded.decoder.get();
+    const size_t hopBytes            = static_cast<size_t>(format.bytesForDuration(QuietHopMs));
+    if(hopBytes == 0) {
+        return 0;
+    }
+
+    decoder->start();
+    decoder->seek(startMs);
+
+    uint64_t pos = startMs;
+    while(pos - startMs < static_cast<uint64_t>(QuietLookaheadMs)) {
+        Fooyin::AudioDecoder::ReadResult result = decoder->readAudio(hopBytes);
+        if(result.status != Fooyin::AudioDecoder::ReadStatus::DecodedAudio || !result.buffer.isValid()) {
+            break;
+        }
+        const double rms = bufferRms(result.buffer);
+        if(rms < QuietRmsThreshold) {
+            return result.buffer.startTime();
+        }
+        const uint64_t duration = result.buffer.duration();
+        const uint64_t next     = result.buffer.startTime() + duration;
+        if(duration == 0 || next <= pos) {
+            break;
+        }
+        pos = next;
+    }
+    return 0;
+}
 } // namespace
 
 namespace Fooyin::Subsonic {
@@ -252,6 +344,7 @@ void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
         }
         else {
             m_pendingSeekPosition = 0;
+            m_pendingSeekBaseMs   = 0;
             m_pendingSeekPath.clear();
         }
     }
@@ -389,9 +482,15 @@ void SubsonicDownloadManager::tryApplyPendingSeek()
     }
 
     const uint64_t position = std::exchange(m_pendingSeekPosition, 0);
+    const qint64 elapsed    = QDateTime::currentMSecsSinceEpoch() - std::exchange(m_pendingSeekBaseMs, 0);
     m_pendingSeekPath.clear();
-    qCInfo(SUBSONIC) << "Restoring position after promotion:" << position << "ms";
-    m_player->seek(position);
+
+    // The remote kept playing while the engine prepared and faded, so advance the restore point by
+    // that wall-clock time to land on the exact position.
+    const uint64_t target = position + (elapsed > 0 ? static_cast<uint64_t>(elapsed) : 0) + SeekDispatchMarginMs;
+    qCInfo(SUBSONIC) << "Restoring position after promotion:" << target << "ms (base" << position << "ms, +"
+                     << elapsed << "ms)";
+    m_player->seek(target);
 }
 
 void SubsonicDownloadManager::request(int index, bool priority)
@@ -700,33 +799,16 @@ void SubsonicDownloadManager::promoteEntryToLocal(int index)
     QMetaObject::invokeMethod(
         this,
         [this, entry, localTrack] {
-            // Commit the current track before the (potentially slow) playlist rewrite so the engine
-            // starts loading the local file as early as possible. A restart near the start of a track
-            // is inaudible, so skip the position restore there.
-            if(m_player && m_player->currentTrack().filepath() == entry.url) {
-                PlaylistTrack current = m_player->currentPlaylistTrack();
-                if(current.isValid()) {
-                    current.track           = localTrack;
-                    const uint64_t position = m_player->currentPosition();
+            const bool isCurrent     = m_player && m_player->currentTrack().filepath() == entry.url;
+            const uint64_t position  = isCurrent ? m_player->currentPosition() : 0;
+            const uint64_t duration  = isCurrent ? m_player->currentTrack().duration() : 0;
 
-                    if(position > ResumeSeekThresholdMs) {
-                        m_pendingSeekPosition = position;
-                        m_pendingSeekPath     = localTrack.filepath();
-                        qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path << "at"
-                                         << position << "ms";
-                    }
-                    else {
-                        m_pendingSeekPosition = 0;
-                        m_pendingSeekPath.clear();
-                        qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path
-                                         << "near start; restarting without seek";
-                    }
-
-                    m_player->changeCurrentTrack(current);
+            // Repoint every playlist entry at the local file. This is silent, but it must run after the
+            // audible commit so fooyin doesn't re-commit the current track on its own (unfaded).
+            const auto rewritePlaylists = [this, entry, localTrack] {
+                if(!m_handler) {
+                    return;
                 }
-            }
-
-            if(m_handler) {
                 for(Playlist* playlist : m_handler->playlists()) {
                     PlaylistTrackList playlistTracks = playlist->playlistTracks();
                     bool changed{false};
@@ -741,9 +823,164 @@ void SubsonicDownloadManager::promoteEntryToLocal(int index)
                                                          PlaylistTrackChangeSource::External);
                     }
                 }
+            };
+
+            if(!isCurrent) {
+                rewritePlaylists();
+                return;
+            }
+
+            // Don't cut a track that's about to end; the switch then happens at the natural boundary.
+            if(duration > 0 && position + NearEndSkipMs >= duration) {
+                qCInfo(SUBSONIC) << "Skipping live cache switch near track end" << entry.path << position
+                                 << "/" << duration << "ms";
+                rewritePlaylists();
+                return;
+            }
+
+            PlaylistTrack current = m_player->currentPlaylistTrack();
+            if(!current.isValid()) {
+                rewritePlaylists();
+                return;
+            }
+            current.track = localTrack;
+
+            if(position > ResumeSeekThresholdMs) {
+                // Mid-track: hand off at a quiet point and let the engine crossfade so the seam is masked.
+                promoteAtQuietPoint(localTrack, entry.url, position, rewritePlaylists);
+            }
+            else {
+                m_pendingSeekPosition = 0;
+                m_pendingSeekPath.clear();
+                qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path
+                                 << "near start; restarting without seek";
+                enableCrossfadeForSwitch();
+                m_player->changeCurrentTrack(current, {Player::AdvanceReason::ManualSelection, true});
+                rewritePlaylists();
             }
         },
         Qt::QueuedConnection);
+}
+
+void SubsonicDownloadManager::promoteAtQuietPoint(const Track& localTrack, const QString& remoteUrl,
+                                                  uint64_t position, std::function<void()> afterCommit)
+{
+    const int token = ++m_promoteToken;
+
+    findQuietPoint(localTrack, position, [this, token, localTrack, remoteUrl, position, afterCommit](uint64_t targetMs) {
+        const auto finish = [afterCommit] {
+            if(afterCommit) {
+                afterCommit();
+            }
+        };
+
+        if(token != m_promoteToken || !m_player || m_player->currentTrack().filepath() != remoteUrl) {
+            finish(); // aborted; still repoint playlists so the entry isn't stranded
+            return;
+        }
+
+        auto doSwitch = [this, token, localTrack, remoteUrl, finish] {
+            if(token != m_promoteToken || !m_player || m_player->currentTrack().filepath() != remoteUrl) {
+                finish();
+                return;
+            }
+
+            PlaylistTrack current = m_player->currentPlaylistTrack();
+            if(!current.isValid()) {
+                finish();
+                return;
+            }
+            current.track         = localTrack;
+            const uint64_t nowPos = m_player->currentPosition();
+            m_pendingSeekPosition = nowPos;
+            m_pendingSeekBaseMs   = QDateTime::currentMSecsSinceEpoch();
+            m_pendingSeekPath     = localTrack.filepath();
+            qCInfo(SUBSONIC) << "Switching to cached file at quiet point" << nowPos << "ms";
+            enableCrossfadeForSwitch();
+            m_player->changeCurrentTrack(current, {Player::AdvanceReason::ManualSelection, true});
+            finish();
+        };
+
+        if(targetMs == 0 || targetMs <= position) {
+            qCInfo(SUBSONIC) << "No quiet point found; switching immediately";
+            doSwitch();
+            return;
+        }
+
+        qCInfo(SUBSONIC) << "Found quiet point at" << targetMs << "ms; scheduling cache switch";
+        const qint64 delay
+            = std::max<qint64>(0, static_cast<qint64>(targetMs) - static_cast<qint64>(m_player->currentPosition()));
+        QTimer::singleShot(delay, this, doSwitch);
+    });
+}
+
+void SubsonicDownloadManager::findQuietPoint(const Track& track, uint64_t startMs,
+                                             std::function<void(uint64_t)> done)
+{
+    if(!m_audioLoader) {
+        done(0);
+        return;
+    }
+
+    auto* loaded = new LoadedDecoder{m_audioLoader->loadDecoderForTrack(track, AudioDecoder::None,
+                                                                        AudioDecoder::NoHints)};
+    if(!loaded->decoder || !loaded->format || !loaded->decoder->allowsConcurrentDecoding()) {
+        delete loaded;
+        done(0);
+        return;
+    }
+
+    auto* watcher = new QFutureWatcher<uint64_t>{this};
+    connect(watcher, &QFutureWatcher<uint64_t>::finished, this, [this, watcher, loaded, done] {
+        const uint64_t target = watcher->result();
+        delete loaded;
+        watcher->deleteLater();
+        done(target);
+    });
+
+    const LoadedDecoder* decoder = loaded;
+    watcher->setFuture(QtConcurrent::run([decoder, startMs] { return decodeQuietPoint(*decoder, startMs); }));
+}
+
+void SubsonicDownloadManager::enableCrossfadeForSwitch()
+{
+    // fooyin fades/crossfades a manual track change only when Engine/Crossfading is on (off by
+    // default). A hard decoder cut is the audible pop, so enable it just around the switch and
+    // restore the user's own value afterwards. The post-switch position restore uses a very short
+    // crossfade seek so the jump is inaudible without taking the simple-seek path, which can leave
+    // the output fader stuck and silence subsequent tracks.
+    const QString crossfadeKey = QStringLiteral("Engine/Crossfading");
+    const QString valuesKey    = QStringLiteral("Engine/CrossfadingValues");
+
+    if(!m_crossfadeRestoreTimer) {
+        m_crossfadeRestoreTimer = new QTimer{this};
+        m_crossfadeRestoreTimer->setSingleShot(true);
+        connect(m_crossfadeRestoreTimer, &QTimer::timeout, this, [this, crossfadeKey, valuesKey] {
+            m_settings->set(crossfadeKey, m_crossfadeWasEnabled);
+            m_settings->set(valuesKey, m_crossfadingValuesRestore);
+            m_crossfadeRestore = false;
+        });
+    }
+
+    if(!m_crossfadeRestore) {
+        m_crossfadeWasEnabled        = m_settings->value(crossfadeKey).toBool();
+        m_crossfadingValuesRestore   = m_settings->value(valuesKey);
+        m_crossfadeRestore           = true;
+        qCInfo(SUBSONIC) << "Enabling fooyin crossfade for cache switch (was" << m_crossfadeWasEnabled
+                         << ")";
+    }
+
+    auto values = m_crossfadingValuesRestore.value<Engine::CrossfadingValues>();
+    // ~60 ms crossfades: enough to mask the decoder cut on most systems, short enough to feel instant.
+    values.manualChange.enabled = true;
+    values.manualChange.in      = 60;
+    values.manualChange.out     = 60;
+    values.seek.enabled         = true;
+    values.seek.in              = 60;
+    values.seek.out             = 60;
+    m_settings->set(crossfadeKey, true);
+    m_settings->set(valuesKey, QVariant::fromValue(values));
+    m_crossfadeRestoreTimer->start(4000);
 }
 
 void SubsonicDownloadManager::evictCacheIfNeeded()

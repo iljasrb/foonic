@@ -97,7 +97,20 @@ QStringList SubsonicDownloadManager::registerSongs(const QList<QJsonObject>& son
     for(int i{0}; i < songs.size(); ++i) {
         const QJsonObject& song = songs.at(i);
         const QString url       = urls.value(i);
-        const QString path      = pathForSong(song, m_dir);
+        const QString songId    = song.value(u"id"_s).toString();
+
+        // A permanent music-library download acts as the cache: reuse it instead of downloading again.
+        if(const int existing = indexForSongId(songId);
+           existing >= 0 && m_entries[existing].library && m_entries[existing].done
+           && QFileInfo::exists(m_entries[existing].path)) {
+            m_entries[existing].song = song;
+            m_entries[existing].url  = url;
+            paths.push_back(m_entries[existing].path);
+            newIndices.push_back(existing);
+            continue;
+        }
+
+        const QString path = pathForSong(song, m_dir);
 
         int index = indexForPath(path);
         if(index < 0) {
@@ -264,7 +277,10 @@ void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
     }
 
     if(m_entries[index].done) {
+        // We have a local copy but the current track is still the remote stream (e.g. a restored
+        // playlist): switch it to the cached/library file so it plays (and seeks) from disk.
         qCDebug(SUBSONIC) << "Current track already cached" << m_entries[index].path;
+        promoteEntryToLocal(index);
         return;
     }
 
@@ -291,6 +307,14 @@ int SubsonicDownloadManager::registerRemoteTrack(const Track& track)
     const QString id = QUrlQuery{url}.queryItemValue(u"id"_s);
     if(id.isEmpty()) {
         return -1;
+    }
+
+    // A permanent library download is the cache: point playback at the local file instead of streaming.
+    if(const int existing = indexForSongId(id);
+       existing >= 0 && m_entries[existing].library && m_entries[existing].done
+       && QFileInfo::exists(m_entries[existing].path)) {
+        m_entries[existing].url = track.filepath();
+        return existing;
     }
 
     if(m_dir.isEmpty()) {
@@ -735,8 +759,8 @@ void SubsonicDownloadManager::evictCacheIfNeeded()
     QFileInfoList files;
     qint64 total{0};
     for(const Entry& entry : m_entries) {
-        if(!entry.done) {
-            continue;
+        if(!entry.done || entry.library) {
+            continue; // library downloads are permanent, not part of the cache budget
         }
         const QFileInfo info{entry.path};
         if(!info.exists()) {
@@ -807,6 +831,85 @@ SubsonicDownloadManager::CacheState SubsonicDownloadManager::cacheStateForSong(c
         return CacheState::Downloading;
     }
     return CacheState::NotCached;
+}
+
+bool SubsonicDownloadManager::isDownloadedCopy(const QString& songId) const
+{
+    const int index = indexForSongId(songId);
+    return index >= 0 && m_entries[index].library && m_entries[index].done;
+}
+
+QString SubsonicDownloadManager::downloadedCopyPath(const QString& songId) const
+{
+    const int index = indexForSongId(songId);
+    if(index < 0 || !m_entries[index].library || !m_entries[index].done) {
+        return {};
+    }
+    return m_entries[index].path;
+}
+
+void SubsonicDownloadManager::addDownloadedCopy(const QString& songId, const QJsonObject& song, const QString& path,
+                                                bool notify)
+{
+    if(songId.isEmpty() || path.isEmpty()) {
+        return;
+    }
+
+    int index = indexForSongId(songId);
+    if(index < 0) {
+        Entry entry;
+        entry.song    = song;
+        entry.path    = path;
+        entry.done    = true;
+        entry.library = true;
+        m_entries.push_back(entry);
+        index = static_cast<int>(m_entries.size()) - 1;
+        m_indexByPath.insert(path, index);
+        m_indexById.insert(songId, index);
+    }
+    else {
+        Entry& entry = m_entries[index];
+        if(entry.library && entry.path == path) {
+            entry.done = true;
+            if(notify) {
+                Q_EMIT cacheStateChanged(songId);
+            }
+            return;
+        }
+
+        // The local copy supersedes any in-flight cache download of the same song. Abort it first so
+        // it cleans up its own cache file before we repoint the entry at the library file.
+        if(index == m_active) {
+            if(m_reply) {
+                m_cancelActive = true;
+                m_reply->abort();
+            }
+            else {
+                m_cancelActive = false;
+                finishCurrent(false);
+            }
+        }
+        m_requests.erase(index);
+        if(m_priority == index) {
+            m_priority = -1;
+        }
+        if(m_gateIndex == index) {
+            m_gateIndex = -1;
+        }
+
+        m_indexByPath.remove(entry.path);
+        entry.song    = song;
+        entry.path    = path;
+        entry.url.clear();
+        entry.done    = true;
+        entry.library = true;
+        m_indexByPath.insert(path, index);
+    }
+
+    if(notify) {
+        Q_EMIT cacheStateChanged(songId);
+        Q_EMIT downloadProgressChanged();
+    }
 }
 
 int SubsonicDownloadManager::downloadProgressForSong(const QString& songId) const

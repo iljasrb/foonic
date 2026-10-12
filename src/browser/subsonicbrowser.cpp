@@ -327,8 +327,13 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
 
     if(m_libraryDownloads) {
         connect(m_libraryDownloads, &SubsonicLibraryDownloader::progress, this,
-                [this](int completed, int total, const QString& current) {
-                    setStatus(tr("Downloading %1/%2: %3").arg(completed + 1).arg(total).arg(current));
+                [this](int completed, int total, int percent, const QString& current) {
+                    const QString progress = percent >= 0 ? tr(" (%1%)").arg(percent) : QString{};
+                    setStatus(tr("Downloading %1/%2%3: %4")
+                                  .arg(completed + 1)
+                                  .arg(total)
+                                  .arg(progress)
+                                  .arg(current));
                 });
         connect(m_libraryDownloads, &SubsonicLibraryDownloader::finished, this,
                 [this](int completed, int failed) {
@@ -337,6 +342,12 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
                 });
         connect(m_libraryDownloads, &SubsonicLibraryDownloader::warning, this,
                 [this](const QString& message) { setStatus(message); });
+        if(m_downloads) {
+            connect(m_libraryDownloads, &SubsonicLibraryDownloader::downloaded, m_downloads,
+                    [this](const QString& songId, const QJsonObject& song, const QString& path) {
+                        m_downloads->addDownloadedCopy(songId, song, path);
+                    });
+        }
     }
 
     auto* refreshButton = new QPushButton{tr("Refresh"), this};
@@ -750,7 +761,9 @@ TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
     TrackList tracks;
     tracks.reserve(songs.size());
     for(const QJsonObject& song : songs) {
-        tracks.push_back(trackForSong(song, m_client->streamUrl(song.value(u"id"_s).toString()).toString()));
+        const QString songId = song.value(u"id"_s).toString();
+        const QString local  = m_downloads ? m_downloads->downloadedCopyPath(songId) : QString{};
+        tracks.push_back(trackForSong(song, local.isEmpty() ? m_client->streamUrl(songId).toString() : local));
     }
     qCInfo(SUBSONIC) << "Dragging" << tracks.size() << "track(s) (stream)";
     return tracks;
@@ -918,7 +931,16 @@ QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const 
     child->setData(0, JsonRole, song);
     child->setData(0, CoverRole, song.value(u"coverArt"_s).toString());
     applyCover(child, song.value(u"coverArt"_s).toString());
-    child->setText(5, cacheText(song.value(u"id"_s).toString()));
+
+    const QString songId = song.value(u"id"_s).toString();
+    // A permanent library copy from an earlier session is the cache; register it (quietly) so the row
+    // shows it and playback uses the local file.
+    if(m_libraryDownloads && m_downloads) {
+        if(const QString local = m_libraryDownloads->existingLocalPath(song); !local.isEmpty()) {
+            m_downloads->addDownloadedCopy(songId, song, local, false);
+        }
+    }
+    child->setText(5, cacheText(songId));
     return child;
 }
 
@@ -1009,7 +1031,9 @@ void SubsonicBrowser::finishGather(const std::shared_ptr<GatherState>& state)
     TrackList tracks;
     tracks.reserve(state->songs.size());
     for(const QJsonObject& song : state->songs) {
-        tracks.push_back(trackForSong(song, m_client->streamUrl(song.value(u"id"_s).toString()).toString()));
+        const QString songId = song.value(u"id"_s).toString();
+        const QString local  = m_downloads ? m_downloads->downloadedCopyPath(songId) : QString{};
+        tracks.push_back(trackForSong(song, local.isEmpty() ? m_client->streamUrl(songId).toString() : local));
     }
     applyAction(tracks, state->action, true);
 }
@@ -1215,6 +1239,10 @@ QString SubsonicBrowser::cacheText(const QString& songId) const
 {
     if(!m_downloads) {
         return {};
+    }
+
+    if(m_downloads->isDownloadedCopy(songId)) {
+        return u"\u2713 Downloaded copy"_s;
     }
 
     switch(m_downloads->cacheStateForSong(songId)) {

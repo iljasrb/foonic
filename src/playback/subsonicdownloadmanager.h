@@ -71,6 +71,19 @@ public:
     void applyPlaybackMode();
 
     [[nodiscard]] CacheState cacheStateForSong(const QString& songId) const;
+
+    /*! True when @p songId has a permanent local copy downloaded into the music library. */
+    [[nodiscard]] bool isDownloadedCopy(const QString& songId) const;
+
+    /*! Path of the permanent local library copy for @p songId, or an empty string. */
+    [[nodiscard]] QString downloadedCopyPath(const QString& songId) const;
+
+    /*!
+     * Records a music-library download of @p songId at @p path so playback uses the local file and the
+     * browser can mark it as a downloaded copy. Supersedes any in-flight cache download of the song.
+     */
+    void addDownloadedCopy(const QString& songId, const QJsonObject& song, const QString& path,
+                           bool notify = true);
     [[nodiscard]] int downloadProgressForSong(const QString& songId) const;
     [[nodiscard]] QString activeDownloadName() const;
     [[nodiscard]] int activeDownloadProgress() const;
@@ -91,6 +104,7 @@ private:
         QString url;
         QString path;
         bool done{false};
+        bool library{false}; // permanent music-library download; never evicted
     };
 
     void onCurrentTrackChanged(const Track& track);

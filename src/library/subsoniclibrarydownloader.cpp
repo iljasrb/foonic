@@ -23,6 +23,8 @@
 #include <QSet>
 #include <QTimer>
 
+#include <algorithm>
+
 using namespace Qt::StringLiterals;
 
 namespace Fooyin::Subsonic {
@@ -31,12 +33,20 @@ constexpr int MaxAttempts   = 3;
 constexpr int RetryDelayMs  = 750;
 constexpr int CoverSize     = 500;
 constexpr int MaxNameLength = 120;
+constexpr int ProgressEmitIntervalMs = 250;
 
 QString sanitise(QString name)
 {
     static const QRegularExpression Invalid{QStringLiteral(R"([\\/:*?"<>|\x00-\x1f])")};
     name.replace(Invalid, u"_"_s);
     return name.trimmed().left(MaxNameLength);
+}
+
+QString withIdSuffix(const QString& path, const QString& id)
+{
+    const QFileInfo info{path};
+    return info.path() + u"/"_s + info.completeBaseName() + u" ["_s + id + u"]"_s
+           + (info.suffix().isEmpty() ? QString{} : u"."_s + info.suffix());
 }
 } // namespace
 
@@ -105,18 +115,19 @@ void SubsonicLibraryDownloader::enqueue(const QList<QJsonObject>& songs)
     for(const QJsonObject& song : songs) {
         ++m_total;
 
-        QString path = pathForSong(song);
+        QString path = pathForSong(song, m_dir);
         // Different songs can map to the same name (multi-disc, duplicate titles); keep them apart.
-        if(reserved.contains(path)) {
-            const QFileInfo info{path};
-            path = info.path() + u"/"_s + info.completeBaseName() + u" ["_s + song.value(u"id"_s).toString()
-                   + u"]."_s + info.suffix();
+        if(reserved.contains(path)
+           || std::any_of(m_queue.cbegin(), m_queue.cend(),
+                          [&path](const Job& job) { return job.path == path; })) {
+            path = withIdSuffix(path, song.value(u"id"_s).toString());
         }
 
         if(QFileInfo::exists(path)) {
             // Already downloaded; scan it so it still lands in the library.
             ++m_processed;
             m_scanned.push_back(QUrl::fromLocalFile(path));
+            Q_EMIT downloaded(song.value(u"id"_s).toString(), song, path);
             continue;
         }
 
@@ -192,7 +203,8 @@ void SubsonicLibraryDownloader::processNext()
     }
 
     qCInfo(SUBSONIC) << "Downloading library track" << m_current.path;
-    Q_EMIT progress(completed(), m_total, m_current.song.value(u"title"_s).toString());
+    m_lastProgressEmit = 0;
+    emitProgress();
     startRequest();
 }
 
@@ -273,6 +285,11 @@ void SubsonicLibraryDownloader::handleReadyRead()
         return;
     }
     m_received += data.size();
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if(now - m_lastProgressEmit >= ProgressEmitIntervalMs) {
+        emitProgress();
+    }
 }
 
 void SubsonicLibraryDownloader::handleFinished()
@@ -402,6 +419,7 @@ void SubsonicLibraryDownloader::advance(bool ok)
     ++m_processed;
     if(ok) {
         m_scanned.push_back(QUrl::fromLocalFile(m_current.path));
+        Q_EMIT downloaded(m_current.song.value(u"id"_s).toString(), m_current.song, m_current.path);
     }
     else {
         ++m_failed;
@@ -409,7 +427,27 @@ void SubsonicLibraryDownloader::advance(bool ok)
     processNext();
 }
 
-QString SubsonicLibraryDownloader::pathForSong(const QJsonObject& song) const
+void SubsonicLibraryDownloader::emitProgress()
+{
+    const int percent
+        = m_totalBytes > 0
+              ? static_cast<int>(std::clamp((m_received * 100) / m_totalBytes, qint64{0}, qint64{100}))
+              : -1;
+    m_lastProgressEmit = QDateTime::currentMSecsSinceEpoch();
+    Q_EMIT progress(completed(), m_total, percent, m_current.song.value(u"title"_s).toString());
+}
+
+QString SubsonicLibraryDownloader::existingLocalPath(const QJsonObject& song) const
+{
+    const QString base = pathForSong(song, loadSubsonicSettings(m_settings).libraryDir);
+    if(QFileInfo::exists(base)) {
+        return base;
+    }
+    const QString withId = withIdSuffix(base, song.value(u"id"_s).toString());
+    return QFileInfo::exists(withId) ? withId : QString{};
+}
+
+QString SubsonicLibraryDownloader::pathForSong(const QJsonObject& song, const QString& dir) const
 {
     QString albumArtist = song.value(u"albumArtist"_s).toString();
     if(albumArtist.isEmpty()) {
@@ -439,7 +477,7 @@ QString SubsonicLibraryDownloader::pathForSong(const QJsonObject& song) const
         suffix = u"bin"_s;
     }
 
-    return m_dir + u"/"_s + sanitise(albumArtist) + u"/"_s + sanitise(album) + u"/"_s + sanitise(title) + u"."_s
+    return dir + u"/"_s + sanitise(albumArtist) + u"/"_s + sanitise(album) + u"/"_s + sanitise(title) + u"."_s
            + suffix;
 }
 } // namespace Fooyin::Subsonic

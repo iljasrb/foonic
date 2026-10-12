@@ -71,7 +71,8 @@ double-click a song to play it. **Refresh** reloads the list.
 **Download to Library** works on any selection (a song, album, artist, playlist or several of them),
 saves each track into the library folder below, writes its tags and cover art, and adds it to the
 fooyin library. Files are laid out as `AlbumArtist/Album/NN - Title.ext` and already-present files are
-skipped.
+skipped. Downloaded (and pre-existing library) tracks are also used as the play cache, so they play
+and seek from disk instead of streaming.
 
 ## Settings
 
@@ -88,8 +89,9 @@ All under **Settings → Foosonic**:
 - **Library folder** — where **Download to Library** saves tracks (default `~/Music/Subsonic`). Point
   it at a folder inside one of your fooyin library paths so downloads become library tracks.
 
-The browser's **Cache** column shows ✓ cached / ↓ downloading, and the settings page shows the cache
-size, file count, and the active download.
+The browser's **Cache** column shows ✓ cached / ✓ **Downloaded copy** (a permanent library file) /
+↓ downloading with a percentage, the status bar shows download progress, and the settings page shows
+the cache size, file count, and the active download.
 
 ## Notes
 

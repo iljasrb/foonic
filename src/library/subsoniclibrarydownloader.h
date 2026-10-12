@@ -48,14 +48,18 @@ public:
     void enqueue(const QList<QJsonObject>& songs);
     void cancel();
 
+    /*! Returns the path of an existing library file for @p song, or an empty string. */
+    [[nodiscard]] QString existingLocalPath(const QJsonObject& song) const;
+
     [[nodiscard]] bool isActive() const;
     [[nodiscard]] int total() const;
     [[nodiscard]] int completed() const;
 
 Q_SIGNALS:
-    void progress(int completed, int total, const QString& current);
+    void progress(int completed, int total, int percent, const QString& current);
     void finished(int completed, int failed);
     void warning(const QString& message);
+    void downloaded(const QString& songId, const QJsonObject& song, const QString& path);
 
 private:
     struct Job
@@ -71,8 +75,9 @@ private:
     void finalizeJob();
     void embedCover();
     void advance(bool ok);
+    void emitProgress();
     void writeTags(const Job& job) const;
-    [[nodiscard]] QString pathForSong(const QJsonObject& song) const;
+    [[nodiscard]] QString pathForSong(const QJsonObject& song, const QString& dir) const;
 
     std::shared_ptr<NetworkAccessManager> m_network;
     std::shared_ptr<AudioLoader> m_audioLoader;
@@ -98,6 +103,7 @@ private:
     qint64 m_totalBytes{-1};
     bool m_rangeChecked{false};
     bool m_sentRange{false};
+    qint64 m_lastProgressEmit{0};
 };
 } // namespace Subsonic
 } // namespace Fooyin

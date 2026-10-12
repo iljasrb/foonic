@@ -56,7 +56,7 @@ void SubsonicClient::setSettings(const SubsonicSettings& settings)
     m_settings = settings;
 }
 
-void SubsonicClient::getArtists(ArtistsCallback callback)
+void SubsonicClient::getArtists(ArrayCallback callback)
 {
     get(u"getArtists"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
         if(!error.isEmpty()) {
@@ -94,7 +94,7 @@ void SubsonicClient::getAlbum(const QString& id, ObjectCallback callback)
         });
 }
 
-void SubsonicClient::getPlaylists(ArtistsCallback callback)
+void SubsonicClient::getPlaylists(ArrayCallback callback)
 {
     get(u"getPlaylists"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
         callback(asArray(response.value(u"playlists"_s).toObject().value(u"playlist"_s)), error);

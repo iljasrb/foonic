@@ -212,7 +212,12 @@ void SubsonicBrowser::refresh()
 
     const int generation = m_generation;
     m_client->getPlaylists([this, generation](const QJsonArray& playlists, const QString& error) {
-        if(generation != m_generation || !error.isEmpty()) {
+        if(generation != m_generation) {
+            return;
+        }
+        if(!error.isEmpty()) {
+            // Not fatal: some servers don't implement getPlaylists.
+            qCWarning(SUBSONIC) << "getPlaylists failed:" << error;
             return;
         }
         for(const QJsonValue& value : playlists) {
@@ -396,7 +401,7 @@ void SubsonicBrowser::loadChildren(QTreeWidgetItem* item, int kind, const QStrin
         m_client->getArtist(id, callback);
     }
     else if(kind == PlaylistNode) {
-        // Not cached: playlists change server-side.
+        // Not cached: playlists change server-side. Expanded children still persist until Refresh.
         m_client->getPlaylist(id, callback);
     }
     else {

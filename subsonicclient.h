@@ -27,7 +27,7 @@ class SubsonicClient : public QObject
 
 public:
     using ObjectCallback = std::function<void(const QJsonObject& object, const QString& error)>;
-    using ArtistsCallback = std::function<void(const QJsonArray& artists, const QString& error)>;
+    using ArrayCallback = std::function<void(const QJsonArray& items, const QString& error)>;
     using SearchCallback = std::function<void(const QJsonObject& searchResult, const QString& error)>;
 
     SubsonicClient(std::shared_ptr<NetworkAccessManager> network, SubsonicSettings settings,
@@ -35,10 +35,10 @@ public:
 
     void setSettings(const SubsonicSettings& settings);
 
-    void getArtists(ArtistsCallback callback);
+    void getArtists(ArrayCallback callback);
     void getArtist(const QString& id, ObjectCallback callback);
     void getAlbum(const QString& id, ObjectCallback callback);
-    void getPlaylists(ArtistsCallback callback);
+    void getPlaylists(ArrayCallback callback);
     void getPlaylist(const QString& id, ObjectCallback callback);
     /*! Searches artists/albums/songs server-side (search3, falling back to search2). */
     void search(const QString& query, SearchCallback callback);

@@ -28,6 +28,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
@@ -83,6 +84,20 @@ public:
     using QTreeWidget::QTreeWidget;
 
     std::function<Fooyin::TrackList(const QList<QTreeWidgetItem*>&)> mimeDataProvider;
+    // Returns true if @p items are ready to drag; otherwise starts a fetch and returns false. The
+    // owner then calls resumeDrag() when it finishes, or cancelDragFetch() if the drag is abandoned.
+    std::function<bool(const QList<QTreeWidgetItem*>&)> dragDataReady;
+    std::function<void()> cancelDragFetch;
+
+    void resumeDrag()
+    {
+        if(m_pendingActions == Qt::IgnoreAction) {
+            return;
+        }
+        const Qt::DropActions actions = m_pendingActions;
+        m_pendingActions              = Qt::IgnoreAction;
+        QTreeWidget::startDrag(actions);
+    }
 
 protected:
     QMimeData* mimeData(const QList<QTreeWidgetItem*>& items) const override
@@ -94,6 +109,32 @@ protected:
         }
         return QTreeWidget::mimeData(items);
     }
+
+    void startDrag(Qt::DropActions supportedActions) override
+    {
+        if(m_pendingActions != Qt::IgnoreAction) {
+            return; // already waiting on a fetch triggered by an earlier move
+        }
+        if(dragDataReady && !dragDataReady(selectedItems())) {
+            m_pendingActions = supportedActions;
+            return;
+        }
+        QTreeWidget::startDrag(supportedActions);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if(m_pendingActions != Qt::IgnoreAction) {
+            m_pendingActions = Qt::IgnoreAction; // drag abandoned before its data arrived
+            if(cancelDragFetch) {
+                cancelDragFetch();
+            }
+        }
+        QTreeWidget::mouseReleaseEvent(event);
+    }
+
+private:
+    Qt::DropActions m_pendingActions{Qt::IgnoreAction};
 };
 } // namespace
 
@@ -111,6 +152,8 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
 {
     auto* tree = static_cast<SubsonicTreeWidget*>(m_tree);
     tree->mimeDataProvider = [this](const QList<QTreeWidgetItem*>& items) { return tracksForDrag(items); };
+    tree->dragDataReady  = [this](const QList<QTreeWidgetItem*>& items) { return ensureDragData(items); };
+    tree->cancelDragFetch = [this] { cancelDragFetch(); };
 
     auto* refreshButton = new QPushButton{tr("Refresh"), this};
 
@@ -199,7 +242,7 @@ void SubsonicBrowser::refresh()
     clearTree();
     m_artists.clear();
     m_playlists.clear();
-    m_playlistSearchText.clear();
+    m_playlistEntries.clear();
     m_playlistScanQueue.clear();
     ++m_playlistScanToken; // cancel any scan still in flight
     m_searchResultReady = false;
@@ -229,11 +272,11 @@ void SubsonicBrowser::refresh()
         for(const QJsonValue& value : playlists) {
             m_playlists.push_back(value.toObject());
         }
-        if(m_filterMode) {
-            startPlaylistScan();
+        if(!m_filterMode) {
+            addPlaylistsHeader();
         }
         else {
-            addPlaylistsHeader();
+            startPlaylistScan();
         }
     });
 
@@ -290,6 +333,105 @@ void SubsonicBrowser::ensureChildrenLoaded(QTreeWidgetItem* item, bool expand)
     loadChildren(item, kind, item->data(0, IdRole).toString(), {}, expand);
 }
 
+bool SubsonicBrowser::ensureDragData(const QList<QTreeWidgetItem*>& items)
+{
+    QStringList albumIds;
+    QStringList playlistIds;
+    QStringList artistIds;
+
+    std::function<void(const QList<QTreeWidgetItem*>&)> scan = [&](const QList<QTreeWidgetItem*>& list) {
+        for(QTreeWidgetItem* item : list) {
+            if(!item) {
+                continue;
+            }
+            const QString id = item->data(0, IdRole).toString();
+            const int kind   = item->data(0, KindRole).toInt();
+            if(kind == Album) {
+                if(!m_songsByAlbum.contains(id) && !albumIds.contains(id)) {
+                    albumIds.push_back(id);
+                }
+            } else if(kind == PlaylistNode) {
+                if(!m_playlistEntries.contains(id) && !playlistIds.contains(id)) {
+                    playlistIds.push_back(id);
+                }
+            } else if(kind == Artist) {
+                if(!m_albumsByArtist.contains(id) && !artistIds.contains(id)) {
+                    artistIds.push_back(id);
+                }
+            } else if(kind == ResultHeader) {
+                QList<QTreeWidgetItem*> children;
+                for(int i{0}; i < item->childCount(); ++i) {
+                    children.push_back(item->child(i));
+                }
+                scan(children);
+            }
+        }
+    };
+    scan(items);
+
+    if(albumIds.isEmpty() && playlistIds.isEmpty() && artistIds.isEmpty()) {
+        return true; // everything already cached: start the drag now
+    }
+    if(m_dragFetching) {
+        return false; // a fetch is already in flight from an earlier drag attempt
+    }
+    m_dragFetching = true;
+    const int token = ++m_dragFetchToken;
+
+    auto remaining = std::make_shared<int>(0);
+    auto finish    = [this, remaining, token] {
+        if(token != m_dragFetchToken) {
+            return; // superseded by a newer drag or cancelled
+        }
+        if(--*remaining == 0) {
+            m_dragFetching = false;
+            static_cast<SubsonicTreeWidget*>(m_tree)->resumeDrag();
+        }
+    };
+
+    for(const QString& id : albumIds) {
+        ++*remaining;
+        m_client->getAlbum(id, [this, id, finish](const QJsonObject& object, const QString& error) {
+            // Cache even on error (empty) so a failed album isn't retried on the next drag.
+            m_songsByAlbum.insert(id, error.isEmpty() ? asArray(object.value(u"song"_s)) : QJsonArray{});
+            finish();
+        });
+    }
+    for(const QString& id : playlistIds) {
+        ++*remaining;
+        m_client->getPlaylist(id, [this, id, finish](const QJsonObject& object, const QString& error) {
+            m_playlistEntries.insert(id, error.isEmpty() ? asArray(object.value(u"entry"_s)) : QJsonArray{});
+            finish();
+        });
+    }
+    for(const QString& id : artistIds) {
+        ++*remaining;
+        m_client->getArtist(id, [this, finish, remaining](const QJsonObject& object, const QString& error) {
+            const QJsonArray albums = error.isEmpty() ? asArray(object.value(u"album"_s)) : QJsonArray{};
+            for(const QJsonValue& album : albums) {
+                const QString albumId = album.toObject().value(u"id"_s).toString();
+                if(albumId.isEmpty() || m_songsByAlbum.contains(albumId)) {
+                    continue;
+                }
+                ++*remaining;
+                m_client->getAlbum(albumId, [this, albumId, finish](const QJsonObject& a, const QString& e) {
+                    m_songsByAlbum.insert(albumId, e.isEmpty() ? asArray(a.value(u"song"_s)) : QJsonArray{});
+                    finish();
+                });
+            }
+            finish();
+        });
+    }
+
+    return false; // drag is deferred until the fetches above finish
+}
+
+void SubsonicBrowser::cancelDragFetch()
+{
+    ++m_dragFetchToken;
+    m_dragFetching = false;
+}
+
 TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
 {
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
@@ -299,22 +441,51 @@ TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
     m_client->setSettings(settings);
 
     QList<QJsonObject> songs;
+    QSet<QString> seenIds;
+    const auto appendSong = [&](const QJsonObject& song) {
+        const QString id = song.value(u"id"_s).toString();
+        if(id.isEmpty() || !seenIds.contains(id)) {
+            seenIds.insert(id);
+            songs.push_back(song);
+        }
+    };
+    const auto appendSongs = [&](const QJsonArray& array) {
+        for(const QJsonValue& value : array) {
+            appendSong(value.toObject());
+        }
+    };
+
+    // Read from the load caches rather than the tree children: on a first drag the children may still
+    // be placeholders (the fetch is async), which is why dragging an unexpanded item used to fail.
     std::function<void(const QList<QTreeWidgetItem*>&)> collect = [&](const QList<QTreeWidgetItem*>& list) {
         for(QTreeWidgetItem* item : list) {
             if(!item) {
                 continue;
             }
-            const int kind = item->data(0, KindRole).toInt();
+            const QString id = item->data(0, IdRole).toString();
+            const int kind   = item->data(0, KindRole).toInt();
             if(kind == Song) {
-                songs.push_back(item->data(0, JsonRole).toJsonObject());
-            } else if(kind == ResultHeader) {
-                QList<QTreeWidgetItem*> children;
-                for(int i{0}; i < item->childCount(); ++i) {
-                    children.push_back(item->child(i));
+                appendSong(item->data(0, JsonRole).toJsonObject());
+            } else if(kind == Album) {
+                if(const auto cached = m_songsByAlbum.constFind(id); cached != m_songsByAlbum.constEnd()) {
+                    appendSongs(cached.value());
+                } else {
+                    ensureChildrenLoaded(item, false);
                 }
-                collect(children);
-            } else if(kind == Artist || kind == Album || kind == PlaylistNode) {
-                ensureChildrenLoaded(item, false);
+            } else if(kind == PlaylistNode) {
+                if(const auto cached = m_playlistEntries.constFind(id); cached != m_playlistEntries.constEnd()) {
+                    appendSongs(cached.value());
+                } else {
+                    ensureChildrenLoaded(item, false);
+                }
+            } else if(kind == Artist) {
+                for(const QJsonValue& album : m_albumsByArtist.value(id)) {
+                    appendSongs(m_songsByAlbum.value(album.toObject().value(u"id"_s).toString()));
+                }
+                if(!m_albumsByArtist.contains(id)) {
+                    ensureChildrenLoaded(item, false);
+                }
+            } else if(kind == ResultHeader) {
                 QList<QTreeWidgetItem*> children;
                 for(int i{0}; i < item->childCount(); ++i) {
                     children.push_back(item->child(i));
@@ -410,7 +581,12 @@ void SubsonicBrowser::loadChildren(QTreeWidgetItem* item, int kind, const QStrin
         m_client->getArtist(id, callback);
     }
     else if(kind == PlaylistNode) {
-        // Playlists change server-side; fetch fresh on expand.
+        if(const auto cached = m_playlistEntries.constFind(id); cached != m_playlistEntries.constEnd()) {
+            QJsonObject object;
+            object[u"entry"_s] = cached.value();
+            callback(object, {});
+            return;
+        }
         m_client->getPlaylist(id, callback);
     }
     else {
@@ -453,6 +629,7 @@ void SubsonicBrowser::populateChildren(QTreeWidgetItem* item, int kind, const QJ
     }
     else if(kind == PlaylistNode) {
         const QJsonArray entries = asArray(object.value(u"entry"_s));
+        m_playlistEntries.insert(item->data(0, IdRole).toString(), entries);
         for(const QJsonValue& value : entries) {
             createSongItem(item, value.toObject());
         }
@@ -951,7 +1128,7 @@ void SubsonicBrowser::startPlaylistScan()
     m_playlistScanDone = 0;
     for(const QJsonObject& playlist : m_playlists) {
         const QString id = playlist.value(u"id"_s).toString();
-        if(!m_playlistSearchText.contains(id)) {
+        if(!m_playlistEntries.contains(id)) {
             m_playlistScanQueue.push_back(id);
         }
     }
@@ -968,20 +1145,11 @@ void SubsonicBrowser::pumpPlaylistScan()
         m_client->getPlaylist(id, [this, token, id](const QJsonObject& object, const QString& error) {
             --m_playlistScanActive;
             if(token == m_playlistScanToken) {
-                // Keep only the searchable text, not full entries, so a large playlist library
-                // doesn't pin hundreds of track objects in memory.
-                QString text;
-                if(error.isEmpty()) {
-                    for(const QJsonValue& entry : asArray(object.value(u"entry"_s))) {
-                        const QJsonObject song = entry.toObject();
-                        text += song.value(u"title"_s).toString() + u' '
-                              + song.value(u"artist"_s).toString() + u' '
-                              + song.value(u"album"_s).toString() + u'\n';
-                    }
-                }
-                m_playlistSearchText.insert(id, text);
+                m_playlistEntries.insert(id, error.isEmpty() ? asArray(object.value(u"entry"_s)) : QJsonArray{});
                 ++m_playlistScanDone;
-                setStatus(tr("Searching playlists (%1/%2)...").arg(m_playlistScanDone).arg(m_playlistScanTotal));
+                if(m_filterMode) {
+                    setStatus(tr("Searching playlists (%1/%2)...").arg(m_playlistScanDone).arg(m_playlistScanTotal));
+                }
             }
             pumpPlaylistScan();
         });
@@ -1011,8 +1179,19 @@ void SubsonicBrowser::buildSearchTree(const QJsonObject& result)
     QList<QJsonObject> playlistMatches;
     for(const QJsonObject& playlist : m_playlists) {
         const QString id = playlist.value(u"id"_s).toString();
-        if(playlist.value(u"name"_s).toString().contains(m_filterText, Qt::CaseInsensitive)
-           || m_playlistSearchText.value(id).contains(m_filterText, Qt::CaseInsensitive)) {
+        bool matches     = playlist.value(u"name"_s).toString().contains(m_filterText, Qt::CaseInsensitive);
+        if(!matches) {
+            for(const QJsonValue& entry : m_playlistEntries.value(id)) {
+                const QJsonObject song = entry.toObject();
+                if(song.value(u"title"_s).toString().contains(m_filterText, Qt::CaseInsensitive)
+                   || song.value(u"artist"_s).toString().contains(m_filterText, Qt::CaseInsensitive)
+                   || song.value(u"album"_s).toString().contains(m_filterText, Qt::CaseInsensitive)) {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+        if(matches) {
             playlistMatches.push_back(playlist);
         }
     }

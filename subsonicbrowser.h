@@ -74,6 +74,8 @@ private:
     void onExpanded(QTreeWidgetItem* item);
     void ensureChildrenLoaded(QTreeWidgetItem* item, bool expand = true);
     [[nodiscard]] TrackList tracksForDrag(const QList<QTreeWidgetItem*>& items);
+    bool ensureDragData(const QList<QTreeWidgetItem*>& items);
+    void cancelDragFetch();
     void showContextMenu(const QPoint& pos);
     void playSelection(BrowserAction action);
 
@@ -122,7 +124,7 @@ private:
     QSet<QString> m_coverRequests;
     QList<QJsonObject> m_artists;
     QList<QJsonObject> m_playlists;
-    QHash<QString, QString> m_playlistSearchText;
+    QHash<QString, QJsonArray> m_playlistEntries;
     QStringList m_playlistScanQueue;
     int m_playlistScanToken{0};
     int m_playlistScanActive{0};
@@ -137,6 +139,8 @@ private:
     bool m_applyingFilter{false};
     int m_generation{0};
     int m_treeGeneration{0};
+    bool m_dragFetching{false};
+    int m_dragFetchToken{0};
 };
 } // namespace Subsonic
 } // namespace Fooyin

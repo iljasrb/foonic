@@ -34,6 +34,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QStringList>
 #include <QTimer>
 #include <QToolButton>
@@ -79,6 +80,16 @@ QJsonArray asArray(const QJsonValue& value)
 qint64 songSize(const QJsonObject& song)
 {
     return static_cast<qint64>(song.value(u"size"_s).toDouble());
+}
+
+// Stable identity of an expandable tree item, used to remember open/closed state across refreshes.
+QString expansionKey(const QTreeWidgetItem* item)
+{
+    const int kind = item->data(0, KindRole).toInt();
+    if(kind != Artist && kind != Album && kind != PlaylistNode) {
+        return {};
+    }
+    return QString::number(kind) + u":"_s + item->data(0, IdRole).toString();
 }
 
 struct FilterTerm
@@ -433,6 +444,7 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
         m_filterTimer->start();
     });
     connect(m_tree, &QTreeWidget::itemExpanded, this, &SubsonicBrowser::onExpanded);
+    connect(m_tree, &QTreeWidget::itemCollapsed, this, &SubsonicBrowser::onCollapsed);
     connect(m_tree, &QTreeWidget::itemClicked, this,
             [this](QTreeWidgetItem* item, int) { ensureChildrenLoaded(item); });
     connect(m_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
@@ -447,6 +459,10 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
             item->setExpanded(true);
         }
     });
+
+    m_scrollRestoreTimer = new QTimer{this};
+    m_scrollRestoreTimer->setSingleShot(true);
+    connect(m_scrollRestoreTimer, &QTimer::timeout, this, [this] { m_pendingScroll = -1; });
 
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &SubsonicBrowser::showContextMenu);
@@ -478,6 +494,8 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
 void SubsonicBrowser::refresh()
 {
     ++m_generation;
+    // Remember where the user was so the rebuilt (and lazily reloaded) tree can restore it.
+    m_pendingScroll = m_tree->verticalScrollBar()->value();
     clearTree();
     m_artists.clear();
     m_playlists.clear();
@@ -551,7 +569,46 @@ void SubsonicBrowser::openSettings()
 
 void SubsonicBrowser::onExpanded(QTreeWidgetItem* item)
 {
+    if(const QString key = expansionKey(item); !key.isEmpty()) {
+        m_expandedKeys.insert(key);
+    }
     ensureChildrenLoaded(item);
+}
+
+void SubsonicBrowser::onCollapsed(QTreeWidgetItem* item)
+{
+    if(const QString key = expansionKey(item); !key.isEmpty()) {
+        m_expandedKeys.remove(key);
+    }
+}
+
+void SubsonicBrowser::restoreExpansion(QTreeWidgetItem* parent)
+{
+    const int count = parent ? parent->childCount() : m_tree->topLevelItemCount();
+    for(int i{0}; i < count; ++i) {
+        QTreeWidgetItem* child = parent ? parent->child(i) : m_tree->topLevelItem(i);
+        const QString key      = expansionKey(child);
+        if(!key.isEmpty() && m_expandedKeys.contains(key)) {
+            child->setExpanded(true); // re-triggers the lazy load, which restores deeper levels
+        }
+    }
+    scheduleScrollRestore();
+}
+
+void SubsonicBrowser::scheduleScrollRestore()
+{
+    if(m_pendingScroll < 0) {
+        return;
+    }
+
+    // Content keeps growing as children load asynchronously, so keep re-applying the offset until the
+    // tree settles, then forget it.
+    QTimer::singleShot(0, this, [this] {
+        if(m_pendingScroll >= 0) {
+            m_tree->verticalScrollBar()->setValue(m_pendingScroll);
+        }
+    });
+    m_scrollRestoreTimer->start(1200);
 }
 
 void SubsonicBrowser::ensureChildrenLoaded(QTreeWidgetItem* item, bool expand)
@@ -881,6 +938,8 @@ void SubsonicBrowser::populateChildren(QTreeWidgetItem* item, int kind, const QJ
     if(expand) {
         item->setExpanded(true);
     }
+
+    restoreExpansion(item);
 }
 
 QTreeWidgetItem* SubsonicBrowser::createArtistItem(const QJsonObject& artist, QTreeWidgetItem* parent)
@@ -1408,6 +1467,7 @@ void SubsonicBrowser::rebuildArtistTree()
         auto* item = createArtistItem(artist);
         addPlaceholder(item);
     }
+    restoreExpansion(nullptr);
     setStatus(tr("%1 artists").arg(m_artists.size()));
 }
 
@@ -1449,6 +1509,7 @@ void SubsonicBrowser::addPlaylistsHeader()
     for(const QJsonObject& playlist : m_playlists) {
         createPlaylistItem(header, playlist);
     }
+    restoreExpansion(header);
 }
 
 void SubsonicBrowser::startPlaylistScan()

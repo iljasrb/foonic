@@ -83,6 +83,9 @@ private:
     };
 
     void onExpanded(QTreeWidgetItem* item);
+    void onCollapsed(QTreeWidgetItem* item);
+    void restoreExpansion(QTreeWidgetItem* parent);
+    void scheduleScrollRestore();
     void ensureChildrenLoaded(QTreeWidgetItem* item, bool expand = true);
     [[nodiscard]] TrackList tracksForDrag(const QList<QTreeWidgetItem*>& items);
     bool ensureDragData(const QList<QTreeWidgetItem*>& items);
@@ -162,6 +165,10 @@ private:
     int m_treeGeneration{0};
     bool m_dragFetching{false};
     int m_dragFetchToken{0};
+    // Remembered across refresh: which items were expanded, and the scroll offset to restore.
+    QSet<QString> m_expandedKeys;
+    int m_pendingScroll{-1};
+    QTimer* m_scrollRestoreTimer{nullptr};
 };
 } // namespace Subsonic
 } // namespace Fooyin

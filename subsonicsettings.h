@@ -56,6 +56,8 @@ struct SubsonicSettings
     bool streamWhileDownloading{true}; // play immediately and switch to the cache at the same position
     int prefetchCount{1};              // upcoming tracks to fetch ahead of playback
     int cacheLimitMb{0};               // maximum cache size, 0 = unlimited
+    bool ignoreSslErrors{false};       // accept self-signed/invalid TLS certificates
+    QString musicFolderId;             // limit browsing/search to one server folder; empty = all
 
     [[nodiscard]] bool isValid() const
     {
@@ -81,6 +83,8 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/StreamWhileDownloading"), true);
     settings->createSetting(QStringLiteral("Subsonic/PrefetchCount"), 1);
     settings->createSetting(QStringLiteral("Subsonic/CacheLimitMb"), 0);
+    settings->createSetting(QStringLiteral("Subsonic/IgnoreSslErrors"), false);
+    settings->createSetting(QStringLiteral("Subsonic/MusicFolderId"), QString{});
 }
 
 inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
@@ -103,6 +107,8 @@ inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
     result.streamWhileDownloading = settings->value(QStringLiteral("Subsonic/StreamWhileDownloading")).toBool();
     result.prefetchCount = std::max(0, settings->value(QStringLiteral("Subsonic/PrefetchCount")).toInt());
     result.cacheLimitMb  = std::max(0, settings->value(QStringLiteral("Subsonic/CacheLimitMb")).toInt());
+    result.ignoreSslErrors = settings->value(QStringLiteral("Subsonic/IgnoreSslErrors")).toBool();
+    result.musicFolderId   = settings->value(QStringLiteral("Subsonic/MusicFolderId")).toString();
     return result;
 }
 
@@ -118,5 +124,7 @@ inline void saveSubsonicSettings(SettingsManager* settings, const SubsonicSettin
     settings->set(QStringLiteral("Subsonic/StreamWhileDownloading"), subsonic.streamWhileDownloading);
     settings->set(QStringLiteral("Subsonic/PrefetchCount"), subsonic.prefetchCount);
     settings->set(QStringLiteral("Subsonic/CacheLimitMb"), subsonic.cacheLimitMb);
+    settings->set(QStringLiteral("Subsonic/IgnoreSslErrors"), subsonic.ignoreSslErrors);
+    settings->set(QStringLiteral("Subsonic/MusicFolderId"), subsonic.musicFolderId);
 }
 } // namespace Fooyin::Subsonic

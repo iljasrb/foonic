@@ -14,6 +14,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
+#include <QSslError>
 
 using namespace Qt::StringLiterals;
 
@@ -111,10 +112,18 @@ void SubsonicClient::getPlaylist(const QString& id, ObjectCallback callback)
         });
 }
 
-void SubsonicClient::ping(std::function<void(const QString& error)> callback)
+void SubsonicClient::getMusicFolders(ArrayCallback callback)
 {
-    get(u"ping"_s, {}, [callback = std::move(callback)](const QJsonObject&, const QString& error) {
-        callback(error);
+    get(u"getMusicFolders"_s, {},
+        [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
+            callback(asArray(response.value(u"musicFolders"_s).toObject().value(u"musicFolder"_s)), error);
+        });
+}
+
+void SubsonicClient::ping(std::function<void(const QJsonObject& response, const QString& error)> callback)
+{
+    get(u"ping"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
+        callback(response, error);
     });
 }
 
@@ -181,6 +190,10 @@ void SubsonicClient::get(const QString& method, const QUrlQuery& query, Response
     }
 
     QNetworkReply* reply = m_network->get(QNetworkRequest{buildUrl(method, query)});
+    if(m_settings.ignoreSslErrors) {
+        connect(reply, &QNetworkReply::sslErrors, reply,
+                [reply](const QList<QSslError>&) { reply->ignoreSslErrors(); });
+    }
     connect(reply, &QNetworkReply::finished, this, [reply, callback = std::move(callback), method]() {
         reply->deleteLater();
 
@@ -232,6 +245,9 @@ QUrl SubsonicClient::buildUrl(const QString& method, QUrlQuery query) const
     query.addQueryItem(u"v"_s, u"1.16.1"_s);
     query.addQueryItem(u"c"_s, u"fooyin-subsonic"_s);
     query.addQueryItem(u"f"_s, u"json"_s);
+    if(!m_settings.musicFolderId.isEmpty()) {
+        query.addQueryItem(u"musicFolderId"_s, m_settings.musicFolderId);
+    }
     url.setQuery(query);
 
     return url;

@@ -502,17 +502,14 @@ void SubsonicBrowser::refresh()
 
         m_artists.reserve(artists.size());
         for(const QJsonValue& value : artists) {
-            const QJsonObject artist = value.toObject();
-            m_artists.push_back(artist);
-            auto* item = createArtistItem(artist);
-            addPlaceholder(item);
+            m_artists.push_back(value.toObject());
         }
 
         if(!m_filterText.isEmpty()) {
             applyFilter();
         }
         else {
-            setStatus(tr("%1 artists").arg(artists.size()));
+            rebuildArtistTree();
         }
     });
 }
@@ -898,11 +895,6 @@ QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const 
     if(size > 0) {
         child->setText(4, formatBytes(size));
     }
-
-    qCInfo(SUBSONIC) << "Track:" << title << "artist=" << song.value(u"artist"_s).toString()
-                     << "size=" << size << "bytes" << "duration=" << seconds << "s"
-                     << "bitrate=" << song.value(u"bitRate"_s).toInt() << "kbps"
-                     << "codec=" << song.value(u"suffix"_s).toString();
 
     child->setData(0, KindRole, Song);
     child->setData(0, IdRole, song.value(u"id"_s).toString());

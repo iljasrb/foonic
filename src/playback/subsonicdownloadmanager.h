@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <QHash>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -114,6 +115,8 @@ private:
     PlaylistHandler* m_handler;
     QString m_dir;
     std::vector<Entry> m_entries;
+    QHash<QString, int> m_indexById;   // song id -> m_entries index
+    QHash<QString, int> m_indexByPath; // cache path -> m_entries index
     std::set<int> m_requests;
     std::map<int, std::function<void(bool)>> m_callbacks;
     int m_active{-1};

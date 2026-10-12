@@ -109,6 +109,10 @@ QStringList SubsonicDownloadManager::registerSongs(const QList<QJsonObject>& son
 
             m_entries.push_back(entry);
             index = static_cast<int>(m_entries.size()) - 1;
+            m_indexByPath.insert(path, index);
+            if(const QString songId = song.value(u"id"_s).toString(); !songId.isEmpty()) {
+                m_indexById.insert(songId, index);
+            }
         }
         else {
             m_entries[index].url = url; // the token changes between sessions
@@ -314,7 +318,10 @@ int SubsonicDownloadManager::registerRemoteTrack(const Track& track)
     entry.url  = track.filepath();
     entry.path = path;
     m_entries.push_back(entry);
-    return static_cast<int>(m_entries.size()) - 1;
+    const int index = static_cast<int>(m_entries.size()) - 1;
+    m_indexByPath.insert(path, index);
+    m_indexById.insert(id, index);
+    return index;
 }
 
 void SubsonicDownloadManager::tryApplyPendingSeek()
@@ -815,22 +822,12 @@ void SubsonicDownloadManager::clearCache()
 
 int SubsonicDownloadManager::indexForPath(const QString& path) const
 {
-    for(int i{0}; i < static_cast<int>(m_entries.size()); ++i) {
-        if(m_entries[i].path == path) {
-            return i;
-        }
-    }
-    return -1;
+    return m_indexByPath.value(path, -1);
 }
 
 int SubsonicDownloadManager::indexForSongId(const QString& songId) const
 {
-    for(int i{0}; i < static_cast<int>(m_entries.size()); ++i) {
-        if(m_entries[i].song.value(u"id"_s).toString() == songId) {
-            return i;
-        }
-    }
-    return -1;
+    return m_indexById.value(songId, -1);
 }
 
 QString SubsonicDownloadManager::pathForSong(const QJsonObject& song, const QString& dir) const

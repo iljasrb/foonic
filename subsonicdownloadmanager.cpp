@@ -788,11 +788,24 @@ void SubsonicDownloadManager::clearCache()
     const QString currentPath = m_player ? m_player->currentTrack().filepath() : QString{};
     const QString activePath
         = (m_active >= 0 && m_active < static_cast<int>(m_entries.size())) ? m_entries[m_active].path : QString{};
-    for(Entry& entry : m_entries) {
-        if(entry.path == currentPath || entry.url == currentPath || entry.path == activePath) {
+
+    if(m_dir.isEmpty()) {
+        m_dir = loadSubsonicSettings(m_settings).downloadDir;
+    }
+
+    // Delete every file in the download dir, including files fetched in earlier sessions that are no
+    // longer tracked in m_entries. Keep the playing/active files so playback isn't interrupted.
+    const QDir dir{m_dir};
+    for(const QFileInfo& info : dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot)) {
+        const QString path = info.absoluteFilePath();
+        if(path == currentPath || path == activePath) {
             continue;
         }
-        if(QFile::remove(entry.path)) {
+        QFile::remove(path);
+    }
+
+    for(Entry& entry : m_entries) {
+        if(entry.done && !QFile::exists(entry.path)) {
             entry.done = false;
             Q_EMIT cacheStateChanged(entry.song.value(u"id"_s).toString());
         }

@@ -1,7 +1,7 @@
 # foosonic
 
-A [fooyin](https://fooyin.org) plugin that browses and streams music from a
-Subsonic-compatible server (Navidrome, Gonic, Airsonic, Subsonic, ...).
+A [fooyin](https://github.com/fooyin/fooyin) plugin that browses and streams music from a
+Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 
 ## Features
 
@@ -9,15 +9,16 @@ Legend: ✅ tested, ⬜ untested/unsure.
 
 | Feature | Status |
 |---|---|
-| Browse artists → albums → songs (lazy tree, length/size/cache columns, cover thumbnails, refresh, status) | ✅ |
-| Play / Add to Playlist / Play Next / Add to Queue / Play a Subsonic playlist (double-click, right-click, drag-and-drop) | ✅ |
-| Download-first playback — stream while caching, then switch to the local file | ✅ |
-| Seamless resume after the switch | ✅ |
-| Server setup, **Test Connection**, token auth (verified on Navidrome + Gonic) | ✅ |
+| Library browser (**View → Foosonic Browser**) | ✅ |
+| Browser to fooyin playlist song appending (with drag and drop) | ✅ |
+| Subsonic playlists | ✅ |
+| Library search + playlist search | ✅ |
+| Stream while caching, then switch to the local file | ✅ |
+| Resume after the switch (works, but needs polishing) | ⚠️ |
+| Server setup | ✅ |
 | Settings persist across restarts | ✅ |
-| Browser window (**View → Foosonic Browser**) | ✅ |
 | Seeking on cached tracks | ✅ |
-| Stream mode (play remote, never cache) | ⬜ |
+| Stream mode (remote play doesn't support track resuming and seeking) | ⚠️ |
 | "Stream while downloading" gate (hold playback until cached) | ⬜ |
 | Prefetch ahead | ⬜ |
 | Download resume (HTTP Range) + retry | ⬜ |
@@ -30,8 +31,9 @@ Legend: ✅ tested, ⬜ untested/unsure.
 
 ## Install
 
-Download `fyplugin_foosonic.so` from the
-[Releases](https://github.com/iljasrb/foosonic/releases) page (pre-release builds), then drop it
+1. Download `fyplugin_foosonic.so` from the
+[Releases](https://github.com/iljasrb/foosonic/releases) page (pre-release builds).
+2. Install it in fooyin: Settings → Plugins → Install, or drop it
 into fooyin's plugin directory:
 
 ```sh
@@ -70,11 +72,9 @@ right-click for Play / Add to Playlist / Play Next / Add to Queue, or double-cli
 
 All under **Settings → Foosonic**:
 
-- **Server URL / Username / Password** with **Test Connection**.
+- **Server config**
 - **Playback mode** — *Download first* (default: stream immediately, cache in the background, switch
-  to the cached file in place) or *Stream* (never cache). Changing it is applied to the current track
-  and the songs already in the playlist: switching to *Stream* stops in-flight caching, switching to
-  *Download first* starts caching whatever is playing.
+  to the cached file in place) or *Stream* (never cache, very restricted).
 - **Stream while downloading** — play at once and switch to the cached file at the same position;
   off = wait until the track has downloaded.
 - **Prefetch ahead** — how many upcoming tracks to fetch (default 1).

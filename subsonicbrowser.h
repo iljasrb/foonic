@@ -80,7 +80,7 @@ private:
     void loadChildren(QTreeWidgetItem* item, int kind, const QString& id, std::function<void()> onDone = {},
                       bool expand = true);
     void populateChildren(QTreeWidgetItem* item, int kind, const QJsonObject& object, bool expand);
-    void addPlaceholder(QTreeWidgetItem* item);
+    void addPlaceholder(QTreeWidgetItem* item, const QString& text = {});
     void gatherTracks(const QList<QTreeWidgetItem*>& items, const std::shared_ptr<GatherState>& state);
     void finishGather(const std::shared_ptr<GatherState>& state);
     void downloadAndPlay(const std::shared_ptr<GatherState>& state);

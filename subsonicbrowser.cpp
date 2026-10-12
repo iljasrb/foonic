@@ -443,8 +443,14 @@ void SubsonicBrowser::populateChildren(QTreeWidgetItem* item, int kind, const QJ
         }
     }
     else if(kind == PlaylistNode) {
-        for(const QJsonValue& value : asArray(object.value(u"entry"_s))) {
+        const QJsonArray entries = asArray(object.value(u"entry"_s));
+        for(const QJsonValue& value : entries) {
             createSongItem(item, value.toObject());
+        }
+        // Gonic (and possibly others) silently drop playlist items whose paths no longer resolve,
+        // returning an empty entry list. Surface that instead of expanding to nothing.
+        if(entries.isEmpty()) {
+            addPlaceholder(item, tr("No tracks (server returned none)"));
         }
     }
 
@@ -510,10 +516,10 @@ QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const 
     return child;
 }
 
-void SubsonicBrowser::addPlaceholder(QTreeWidgetItem* item)
+void SubsonicBrowser::addPlaceholder(QTreeWidgetItem* item, const QString& text)
 {
     auto* placeholder = new QTreeWidgetItem{item};
-    placeholder->setText(0, tr("Loading..."));
+    placeholder->setText(0, text.isEmpty() ? tr("Loading...") : text);
     placeholder->setData(0, KindRole, Placeholder);
     placeholder->setDisabled(true);
 }

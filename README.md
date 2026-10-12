@@ -10,7 +10,7 @@ Legend: ✅ tested, ⬜ untested/unsure.
 | Feature | Status |
 |---|---|
 | Browse artists → albums → songs (lazy tree, length/size/cache columns, cover thumbnails, refresh, status) | ✅ |
-| Play / Add to Playlist / Play Next / Add to Queue (double-click, right-click, drag-and-drop) | ✅ |
+| Play / Add to Playlist / Play Next / Add to Queue / Play A Subsonic playlist (double-click, right-click, drag-and-drop) | ✅ |
 | Download-first playback — stream while caching, then switch to the local file | ✅ |
 | Seamless resume after the switch | ✅ |
 | Server setup, **Test Connection**, token auth (verified on Navidrome + Gonic) | ✅ |

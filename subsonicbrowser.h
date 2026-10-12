@@ -94,6 +94,7 @@ private:
     void applyFilter();
     void clearTree();
     void rebuildArtistTree();
+    void addPlaylistsHeader();
     void buildSearchTree(const QJsonObject& result);
     QTreeWidgetItem* createArtistItem(const QJsonObject& artist, QTreeWidgetItem* parent = nullptr);
     QTreeWidgetItem* createAlbumItem(QTreeWidgetItem* parent, const QJsonObject& album);
@@ -115,6 +116,7 @@ private:
     QHash<QString, QPixmap> m_coverCache;
     QSet<QString> m_coverRequests;
     QList<QJsonObject> m_artists;
+    QList<QJsonObject> m_playlists;
     QHash<QString, QJsonArray> m_albumsByArtist;
     QHash<QString, QJsonArray> m_songsByAlbum;
     int m_searchGeneration{0};

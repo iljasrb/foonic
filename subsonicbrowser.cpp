@@ -54,6 +54,7 @@ enum ItemKind : uint8_t
     Album       = 2,
     Song        = 3,
     ResultHeader = 4,
+    PlaylistNode = 5,
 };
 
 QJsonArray asArray(const QJsonValue& value)
@@ -195,6 +196,7 @@ void SubsonicBrowser::refresh()
     ++m_generation;
     clearTree();
     m_artists.clear();
+    m_playlists.clear();
     m_albumsByArtist.clear();
     m_songsByAlbum.clear();
     m_filterMode = false;
@@ -209,6 +211,18 @@ void SubsonicBrowser::refresh()
     setStatus(tr("Loading artists..."));
 
     const int generation = m_generation;
+    m_client->getPlaylists([this, generation](const QJsonArray& playlists, const QString& error) {
+        if(generation != m_generation || !error.isEmpty()) {
+            return;
+        }
+        for(const QJsonValue& value : playlists) {
+            m_playlists.push_back(value.toObject());
+        }
+        if(!m_filterMode) {
+            addPlaylistsHeader();
+        }
+    });
+
     m_client->getArtists([this, generation](const QJsonArray& artists, const QString& error) {
         if(generation != m_generation) {
             return;
@@ -254,7 +268,7 @@ void SubsonicBrowser::ensureChildrenLoaded(QTreeWidgetItem* item, bool expand)
     }
 
     const int kind = item->data(0, KindRole).toInt();
-    if(kind != Artist && kind != Album) {
+    if(kind != Artist && kind != Album && kind != PlaylistNode) {
         return;
     }
 
@@ -285,7 +299,7 @@ TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
                     children.push_back(item->child(i));
                 }
                 collect(children);
-            } else if(kind == Artist || kind == Album) {
+            } else if(kind == Artist || kind == Album || kind == PlaylistNode) {
                 ensureChildrenLoaded(item, false);
                 QList<QTreeWidgetItem*> children;
                 for(int i{0}; i < item->childCount(); ++i) {
@@ -381,6 +395,10 @@ void SubsonicBrowser::loadChildren(QTreeWidgetItem* item, int kind, const QStrin
         }
         m_client->getArtist(id, callback);
     }
+    else if(kind == PlaylistNode) {
+        // Not cached: playlists change server-side.
+        m_client->getPlaylist(id, callback);
+    }
     else {
         if(const auto cached = m_songsByAlbum.constFind(id); cached != m_songsByAlbum.constEnd()) {
             QJsonObject object;
@@ -416,6 +434,11 @@ void SubsonicBrowser::populateChildren(QTreeWidgetItem* item, int kind, const QJ
         const QJsonArray songs = asArray(object.value(u"song"_s));
         m_songsByAlbum.insert(item->data(0, IdRole).toString(), songs);
         for(const QJsonValue& value : songs) {
+            createSongItem(item, value.toObject());
+        }
+    }
+    else if(kind == PlaylistNode) {
+        for(const QJsonValue& value : asArray(object.value(u"entry"_s))) {
             createSongItem(item, value.toObject());
         }
     }
@@ -508,7 +531,7 @@ void SubsonicBrowser::gatherTracks(const QList<QTreeWidgetItem*>& items, const s
                 children.push_back(item->child(i));
             }
             gatherTracks(children, state);
-        } else if(kind == Artist || kind == Album) {
+        } else if(kind == Artist || kind == Album || kind == PlaylistNode) {
             if(item->data(0, LoadedRole).toBool()) {
                 QList<QTreeWidgetItem*> children;
                 for(int i{0}; i < item->childCount(); ++i) {
@@ -847,11 +870,40 @@ void SubsonicBrowser::clearTree()
 void SubsonicBrowser::rebuildArtistTree()
 {
     clearTree();
+    addPlaylistsHeader();
     for(const QJsonObject& artist : m_artists) {
         auto* item = createArtistItem(artist);
         addPlaceholder(item);
     }
     setStatus(tr("%1 artists").arg(m_artists.size()));
+}
+
+void SubsonicBrowser::addPlaylistsHeader()
+{
+    if(m_playlists.isEmpty()) {
+        return;
+    }
+
+    auto* header = new QTreeWidgetItem;
+    m_tree->insertTopLevelItem(0, header);
+    header->setText(0, tr("Playlists (%1)").arg(m_playlists.size()));
+    header->setData(0, KindRole, ResultHeader);
+    header->setFirstColumnSpanned(true);
+    QFont font = header->font(0);
+    font.setBold(true);
+    header->setFont(0, font);
+
+    for(const QJsonObject& playlist : m_playlists) {
+        auto* item = new QTreeWidgetItem{header};
+        item->setText(0, playlist.value(u"name"_s).toString());
+        item->setText(1, playlist.value(u"owner"_s).toString());
+        item->setText(2, tr("%1 songs").arg(playlist.value(u"songCount"_s).toInt()));
+        item->setData(0, KindRole, PlaylistNode);
+        item->setData(0, IdRole, playlist.value(u"id"_s).toString());
+        item->setData(0, CoverRole, playlist.value(u"coverArt"_s).toString());
+        applyCover(item, playlist.value(u"coverArt"_s).toString());
+        addPlaceholder(item);
+    }
 }
 
 void SubsonicBrowser::buildSearchTree(const QJsonObject& result)

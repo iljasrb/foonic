@@ -9,6 +9,7 @@
 #include "subsonicbrowserwidget.h"
 #include "subsonicdialog.h"
 #include "subsonicdownloadmanager.h"
+#include "subsoniclibrarydownloader.h"
 #include "subsonicsettings.h"
 #include "subsonicsettingspage.h"
 
@@ -38,6 +39,9 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
     m_downloads = new SubsonicDownloadManager{m_network, m_settings, context.playerController,
                                               context.playlistHandler, context.audioLoader, this};
 
+    m_libraryDownloads = new SubsonicLibraryDownloader{m_network, m_settings, context.audioLoader,
+                                                       context.library, this};
+
     // With the stock 2 MB read-ahead, fooyin throttles a remote file to playback speed, so the
     // HTTP connection stays open for the whole track. Servers/proxies in front of Subsonic
     // (e.g. Cloudflare/Caddy) often cut such long-lived streams, after which playback stops.
@@ -65,7 +69,9 @@ void SubsonicPlugin::initialise(const GuiPluginContext& context)
 
     m_widgetProvider->registerWidget(
         u"SubsonicBrowser"_s,
-        [this]() { return new SubsonicBrowserWidget{m_network, m_interactor, m_downloads, m_settings}; },
+        [this]() {
+            return new SubsonicBrowserWidget{m_network, m_interactor, m_downloads, m_libraryDownloads, m_settings};
+        },
         tr("Foosonic Browser"));
     m_widgetProvider->setSubMenus(u"SubsonicBrowser"_s, {tr("Internet")});
 
@@ -88,7 +94,8 @@ void SubsonicPlugin::showBrowser()
         return;
     }
 
-    m_dialog = new SubsonicDialog{m_network, m_interactor, m_downloads, m_settings, Utils::getMainWindow()};
+    m_dialog = new SubsonicDialog{m_network, m_interactor, m_downloads, m_libraryDownloads, m_settings,
+                                  Utils::getMainWindow()};
     m_dialog->setAttribute(Qt::WA_DeleteOnClose);
     m_dialog->show();
 }

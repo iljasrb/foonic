@@ -58,6 +58,7 @@ struct SubsonicSettings
     int cacheLimitMb{0};               // maximum cache size, 0 = unlimited
     bool ignoreSslErrors{false};       // accept self-signed/invalid TLS certificates
     QString musicFolderId;             // limit browsing/search to one server folder; empty = all
+    QString libraryDir;                // albums/songs downloaded here are added to the fooyin library
 
     [[nodiscard]] bool isValid() const
     {
@@ -68,6 +69,15 @@ struct SubsonicSettings
 inline QString defaultDownloadDir()
 {
     return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/subsonic");
+}
+
+inline QString defaultLibraryDir()
+{
+    QString base = QStandardPaths::writableLocation(QStandardPaths::MusicLocation);
+    if(base.isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::HomeLocation) + QStringLiteral("/Music");
+    }
+    return base + QStringLiteral("/Subsonic");
 }
 
 inline void registerSubsonicSettings(SettingsManager* settings)
@@ -85,6 +95,7 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/CacheLimitMb"), 0);
     settings->createSetting(QStringLiteral("Subsonic/IgnoreSslErrors"), false);
     settings->createSetting(QStringLiteral("Subsonic/MusicFolderId"), QString{});
+    settings->createSetting(QStringLiteral("Subsonic/LibraryDir"), defaultLibraryDir());
 }
 
 inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
@@ -109,6 +120,10 @@ inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
     result.cacheLimitMb  = std::max(0, settings->value(QStringLiteral("Subsonic/CacheLimitMb")).toInt());
     result.ignoreSslErrors = settings->value(QStringLiteral("Subsonic/IgnoreSslErrors")).toBool();
     result.musicFolderId   = settings->value(QStringLiteral("Subsonic/MusicFolderId")).toString();
+    result.libraryDir      = settings->value(QStringLiteral("Subsonic/LibraryDir")).toString();
+    if(result.libraryDir.isEmpty()) {
+        result.libraryDir = defaultLibraryDir();
+    }
     return result;
 }
 
@@ -126,5 +141,6 @@ inline void saveSubsonicSettings(SettingsManager* settings, const SubsonicSettin
     settings->set(QStringLiteral("Subsonic/CacheLimitMb"), subsonic.cacheLimitMb);
     settings->set(QStringLiteral("Subsonic/IgnoreSslErrors"), subsonic.ignoreSslErrors);
     settings->set(QStringLiteral("Subsonic/MusicFolderId"), subsonic.musicFolderId);
+    settings->set(QStringLiteral("Subsonic/LibraryDir"), subsonic.libraryDir);
 }
 } // namespace Fooyin::Subsonic

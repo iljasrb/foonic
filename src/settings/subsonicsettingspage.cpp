@@ -50,6 +50,7 @@ private:
     void testConnection();
     void loadMusicFolders();
     void browseDownloadDir();
+    void browseLibraryDir();
     void clearCache();
     void updateBitRateState();
     void updateModeState();
@@ -71,6 +72,7 @@ private:
     QComboBox* m_format;
     QSpinBox* m_maxBitRate;
     QLineEdit* m_downloadDir;
+    QLineEdit* m_libraryDir;
     QCheckBox* m_streamWhileDownloading;
     QSpinBox* m_prefetch;
     QSpinBox* m_cacheLimit;
@@ -95,6 +97,7 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     , m_format{new QComboBox{this}}
     , m_maxBitRate{new QSpinBox{this}}
     , m_downloadDir{new QLineEdit{this}}
+    , m_libraryDir{new QLineEdit{this}}
     , m_streamWhileDownloading{new QCheckBox{tr("Stream while downloading"), this}}
     , m_prefetch{new QSpinBox{this}}
     , m_cacheLimit{new QSpinBox{this}}
@@ -186,15 +189,33 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     auto* cacheGroup = new QGroupBox{tr("Download Cache"), this};
     cacheGroup->setLayout(cacheForm);
 
+    auto* libraryBrowse = new QPushButton{tr("Browse..."), this};
+    auto* libraryRow    = new QHBoxLayout;
+    libraryRow->addWidget(m_libraryDir, 1);
+    libraryRow->addWidget(libraryBrowse);
+
+    auto* libraryHint = new QLabel{
+        tr("Albums and songs downloaded here are saved as tagged files and added to the fooyin library."), this};
+    libraryHint->setWordWrap(true);
+
+    auto* libraryForm = new QFormLayout;
+    libraryForm->addRow(tr("Library folder"), libraryRow);
+    libraryForm->addRow({}, libraryHint);
+
+    auto* libraryGroup = new QGroupBox{tr("Local Library"), this};
+    libraryGroup->setLayout(libraryForm);
+
     auto* layout = new QVBoxLayout{this};
     layout->addWidget(connectionGroup);
     layout->addWidget(playbackGroup);
     layout->addWidget(cacheGroup);
+    layout->addWidget(libraryGroup);
     layout->addStretch();
 
     connect(testButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::testConnection);
     connect(m_refreshFolders, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::loadMusicFolders);
     connect(browseButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::browseDownloadDir);
+    connect(libraryBrowse, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::browseLibraryDir);
     connect(clearButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::clearCache);
     connect(m_format, &QComboBox::currentIndexChanged, this, &SubsonicSettingsPageWidget::updateBitRateState);
     connect(m_mode, &QComboBox::currentIndexChanged, this, &SubsonicSettingsPageWidget::updateModeState);
@@ -247,6 +268,7 @@ void SubsonicSettingsPageWidget::load()
 
     m_maxBitRate->setValue(settings.maxBitRate);
     m_downloadDir->setText(settings.downloadDir);
+    m_libraryDir->setText(settings.libraryDir);
     m_streamWhileDownloading->setChecked(settings.streamWhileDownloading);
     m_prefetch->setValue(settings.prefetchCount);
     m_cacheLimit->setValue(settings.cacheLimitMb);
@@ -276,6 +298,7 @@ void SubsonicSettingsPageWidget::apply()
     settings.format       = m_format->currentData().toString();
     settings.maxBitRate   = (settings.format == "raw"_L1) ? 0 : m_maxBitRate->value();
     settings.downloadDir  = m_downloadDir->text().trimmed();
+    settings.libraryDir   = m_libraryDir->text().trimmed();
     settings.streamWhileDownloading = m_streamWhileDownloading->isChecked();
     settings.prefetchCount          = m_prefetch->value();
     settings.cacheLimitMb           = m_cacheLimit->value();
@@ -308,6 +331,7 @@ void SubsonicSettingsPageWidget::reset()
     m_format->setCurrentIndex(0);
     m_maxBitRate->setValue(0);
     m_downloadDir->setText(defaultDownloadDir());
+    m_libraryDir->setText(defaultLibraryDir());
     m_streamWhileDownloading->setChecked(true);
     m_prefetch->setValue(1);
     m_cacheLimit->setValue(0);
@@ -388,6 +412,14 @@ void SubsonicSettingsPageWidget::browseDownloadDir()
     const QString dir = QFileDialog::getExistingDirectory(this, tr("Download folder"), m_downloadDir->text());
     if(!dir.isEmpty()) {
         m_downloadDir->setText(dir);
+    }
+}
+
+void SubsonicSettingsPageWidget::browseLibraryDir()
+{
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Library folder"), m_libraryDir->text());
+    if(!dir.isEmpty()) {
+        m_libraryDir->setText(dir);
     }
 }
 

@@ -16,9 +16,10 @@ using namespace Qt::StringLiterals;
 
 namespace Fooyin::Subsonic {
 SubsonicDialog::SubsonicDialog(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                               SubsonicDownloadManager* downloads, SettingsManager* settings, QWidget* parent)
+                               SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
+                               SettingsManager* settings, QWidget* parent)
     : QDialog{parent}
-    , m_browser{new SubsonicBrowser{std::move(network), interactor, downloads, settings, this}}
+    , m_browser{new SubsonicBrowser{std::move(network), interactor, downloads, libraryDownloads, settings, this}}
 {
     setWindowTitle(tr("Foosonic Browser"));
 

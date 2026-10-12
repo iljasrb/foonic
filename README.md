@@ -65,8 +65,13 @@ The browser has a **Filter** box that searches the server (Subsonic `search3`, f
 debounced).
 
 Expand an artist to load its albums and an album to load its songs. Drag a selection onto a playlist,
-right-click for Play / Add to Playlist / Play Next / Add to Queue, or double-click a song to play it.
-**Refresh** reloads the list.
+right-click for Play / Add to Playlist / Play Next / Add to Queue / Download to Library, or
+double-click a song to play it. **Refresh** reloads the list.
+
+**Download to Library** works on any selection (a song, album, artist, playlist or several of them),
+saves each track into the library folder below, writes its tags and cover art, and adds it to the
+fooyin library. Files are laid out as `AlbumArtist/Album/NN - Title.ext` and already-present files are
+skipped.
 
 ## Settings
 
@@ -80,6 +85,8 @@ All under **Settings → Foosonic**:
 - **Prefetch ahead** — how many upcoming tracks to fetch (default 1).
 - **Stream format** (Original / MP3 / Opus / AAC) and **Max bitrate**.
 - **Download folder**, **Cache size limit**, and **Clear Cache**.
+- **Library folder** — where **Download to Library** saves tracks (default `~/Music/Subsonic`). Point
+  it at a folder inside one of your fooyin library paths so downloads become library tracks.
 
 The browser's **Cache** column shows ✓ cached / ↓ downloading, and the settings page shows the cache
 size, file count, and the active download.

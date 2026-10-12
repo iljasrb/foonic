@@ -39,6 +39,7 @@ class SettingsManager;
 namespace Subsonic {
 class SubsonicClient;
 class SubsonicDownloadManager;
+class SubsonicLibraryDownloader;
 
 enum class BrowserAction : uint8_t
 {
@@ -46,6 +47,7 @@ enum class BrowserAction : uint8_t
     AddToPlaylist,
     PlayNext,
     AddToQueue,
+    Download,
 };
 
 enum class MatchMode
@@ -64,7 +66,8 @@ class SubsonicBrowser : public QWidget
 
 public:
     SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                    SubsonicDownloadManager* downloads, SettingsManager* settings, QWidget* parent = nullptr);
+                    SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
+                    SettingsManager* settings, QWidget* parent = nullptr);
 
     void refresh();
     void openSettings();
@@ -95,6 +98,8 @@ private:
     void gatherTracks(const QList<QTreeWidgetItem*>& items, const std::shared_ptr<GatherState>& state);
     void finishGather(const std::shared_ptr<GatherState>& state);
     void downloadAndPlay(const std::shared_ptr<GatherState>& state);
+    void downloadToLibrary(const std::shared_ptr<GatherState>& state);
+    void updateLibraryDownloadStatus();
     void applyAction(const TrackList& tracks, BrowserAction action, bool startPlayback);
     [[nodiscard]] Track trackForSong(const QJsonObject& song, const QString& filepath) const;
     [[nodiscard]] QString cacheText(const QString& songId) const;
@@ -120,6 +125,7 @@ private:
     std::shared_ptr<NetworkAccessManager> m_network;
     PlaylistInteractor* m_interactor;
     SubsonicDownloadManager* m_downloads;
+    SubsonicLibraryDownloader* m_libraryDownloads;
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     QLabel* m_status;

@@ -8,6 +8,7 @@
 
 #include "subsonicclient.h"
 #include "subsonicdownloadmanager.h"
+#include "subsoniclibrarydownloader.h"
 #include "subsonicsettings.h"
 #include "subsonictrack.h"
 
@@ -307,11 +308,13 @@ private:
 
 namespace Fooyin::Subsonic {
 SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                                 SubsonicDownloadManager* downloads, SettingsManager* settings, QWidget* parent)
+                                 SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
+                                 SettingsManager* settings, QWidget* parent)
     : QWidget{parent}
     , m_network{std::move(network)}
     , m_interactor{interactor}
     , m_downloads{downloads}
+    , m_libraryDownloads{libraryDownloads}
     , m_settings{settings}
     , m_client{new SubsonicClient{m_network, loadSubsonicSettings(settings), this}}
     , m_status{new QLabel{this}}
@@ -321,6 +324,20 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     tree->mimeDataProvider = [this](const QList<QTreeWidgetItem*>& items) { return tracksForDrag(items); };
     tree->dragDataReady  = [this](const QList<QTreeWidgetItem*>& items) { return ensureDragData(items); };
     tree->cancelDragFetch = [this] { cancelDragFetch(); };
+
+    if(m_libraryDownloads) {
+        connect(m_libraryDownloads, &SubsonicLibraryDownloader::progress, this,
+                [this](int completed, int total, const QString& current) {
+                    setStatus(tr("Downloading %1/%2: %3").arg(completed + 1).arg(total).arg(current));
+                });
+        connect(m_libraryDownloads, &SubsonicLibraryDownloader::finished, this,
+                [this](int completed, int failed) {
+                    setStatus(failed > 0 ? tr("Downloaded %1 track(s); %2 failed.").arg(completed).arg(failed)
+                                        : tr("Downloaded %1 track(s) to the library.").arg(completed));
+                });
+        connect(m_libraryDownloads, &SubsonicLibraryDownloader::warning, this,
+                [this](const QString& message) { setStatus(message); });
+    }
 
     auto* refreshButton = new QPushButton{tr("Refresh"), this};
 
@@ -971,6 +988,11 @@ void SubsonicBrowser::finishGather(const std::shared_ptr<GatherState>& state)
         return;
     }
 
+    if(state->action == BrowserAction::Download) {
+        downloadToLibrary(state);
+        return;
+    }
+
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     m_client->setSettings(settings);
 
@@ -990,6 +1012,18 @@ void SubsonicBrowser::finishGather(const std::shared_ptr<GatherState>& state)
         tracks.push_back(trackForSong(song, m_client->streamUrl(song.value(u"id"_s).toString()).toString()));
     }
     applyAction(tracks, state->action, true);
+}
+
+void SubsonicBrowser::downloadToLibrary(const std::shared_ptr<GatherState>& state)
+{
+    if(!m_libraryDownloads) {
+        setStatus(tr("Library downloads are unavailable."));
+        return;
+    }
+
+    qCInfo(SUBSONIC) << "Queuing" << state->songs.size() << "track(s) for library download";
+    m_libraryDownloads->enqueue(state->songs);
+    setStatus(tr("Queued %1 track(s) for download.").arg(state->songs.size()));
 }
 
 void SubsonicBrowser::downloadAndPlay(const std::shared_ptr<GatherState>& state)
@@ -1065,6 +1099,8 @@ void SubsonicBrowser::applyAction(const TrackList& tracks, BrowserAction action,
             }
             setStatus(tr("Queued %1 track(s).").arg(tracks.size()));
             break;
+        case BrowserAction::Download:
+            break; // handled in finishGather() before tracks are built
     }
 }
 
@@ -1086,6 +1122,12 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     menu.addSeparator();
     QAction* nextAction  = menu.addAction(tr("Play Next"));
     QAction* queueAction = menu.addAction(tr("Add to Queue"));
+    menu.addSeparator();
+    QAction* downloadAction = menu.addAction(tr("Download to Library"));
+    QAction* cancelAction{nullptr};
+    if(m_libraryDownloads && m_libraryDownloads->isActive()) {
+        cancelAction = menu.addAction(tr("Cancel Download"));
+    }
 
     QAction* chosen = menu.exec(m_tree->viewport()->mapToGlobal(pos));
     if(!chosen) {
@@ -1103,6 +1145,13 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     }
     else if(chosen == queueAction) {
         playSelection(BrowserAction::AddToQueue);
+    }
+    else if(chosen == downloadAction) {
+        playSelection(BrowserAction::Download);
+    }
+    else if(cancelAction && chosen == cancelAction) {
+        m_libraryDownloads->cancel();
+        setStatus(tr("Download cancelled."));
     }
 }
 

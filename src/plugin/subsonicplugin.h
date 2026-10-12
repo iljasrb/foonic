@@ -22,6 +22,7 @@ class WidgetProvider;
 namespace Subsonic {
 class SubsonicDialog;
 class SubsonicDownloadManager;
+class SubsonicLibraryDownloader;
 
 class SubsonicPlugin : public QObject,
                        public Plugin,
@@ -45,6 +46,7 @@ private:
     ActionManager* m_actionManager{nullptr};
     WidgetProvider* m_widgetProvider{nullptr};
     SubsonicDownloadManager* m_downloads{nullptr};
+    SubsonicLibraryDownloader* m_libraryDownloads{nullptr};
     QPointer<SubsonicDialog> m_dialog;
 };
 } // namespace Subsonic

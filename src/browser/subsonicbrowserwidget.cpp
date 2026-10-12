@@ -15,9 +15,10 @@ using namespace Qt::StringLiterals;
 namespace Fooyin::Subsonic {
 SubsonicBrowserWidget::SubsonicBrowserWidget(std::shared_ptr<NetworkAccessManager> network,
                                              PlaylistInteractor* interactor, SubsonicDownloadManager* downloads,
-                                             SettingsManager* settings, QWidget* parent)
+                                             SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
+                                             QWidget* parent)
     : FyWidget{parent}
-    , m_browser{new SubsonicBrowser{std::move(network), interactor, downloads, settings, this}}
+    , m_browser{new SubsonicBrowser{std::move(network), interactor, downloads, libraryDownloads, settings, this}}
 {
     auto* layout = new QVBoxLayout{this};
     layout->setContentsMargins({});

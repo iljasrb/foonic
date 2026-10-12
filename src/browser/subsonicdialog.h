@@ -18,6 +18,7 @@ class SettingsManager;
 namespace Subsonic {
 class SubsonicBrowser;
 class SubsonicDownloadManager;
+class SubsonicLibraryDownloader;
 
 class SubsonicDialog : public QDialog
 {
@@ -25,7 +26,8 @@ class SubsonicDialog : public QDialog
 
 public:
     SubsonicDialog(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                   SubsonicDownloadManager* downloads, SettingsManager* settings, QWidget* parent = nullptr);
+                   SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
+                   SettingsManager* settings, QWidget* parent = nullptr);
 
 private:
     SubsonicBrowser* m_browser;

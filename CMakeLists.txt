@@ -16,6 +16,8 @@ create_fooyin_plugin(
             src/client/subsonicclient.h
             src/playback/subsonicdownloadmanager.cpp
             src/playback/subsonicdownloadmanager.h
+            src/library/subsoniclibrarydownloader.cpp
+            src/library/subsoniclibrarydownloader.h
             src/browser/subsonicbrowser.cpp
             src/browser/subsonicbrowser.h
             src/browser/subsonicbrowserwidget.cpp
@@ -33,6 +35,7 @@ target_include_directories(
             src/settings
             src/client
             src/playback
+            src/library
             src/browser
             src/plugin
 )

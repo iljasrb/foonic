@@ -5,33 +5,31 @@ Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 
 ## Features
 
-Legend: ✅ tested, ⬜ untested/unsure.
+Legend: ✅ confirmed working, ⬜ not verified yet.
 
 | Feature | Status |
 |---|---|
-| Library browser (**View → Foosonic Browser**) | ✅ |
-| Browser to fooyin playlist song appending (with drag and drop) | ✅ |
-| Subsonic playlists | ✅ |
-| Server playlist editing (create / add / rename / delete) | ✅ |
-| Library search + playlist search | ✅ |
-| Stream while caching, then switch to the local file | ✅ |
-| Remote streaming is seekable + pausable (HTTP Range) | ✅ |
-| Resume after the switch (works, but needs polishing) | ⚠️ |
-| Server setup | ✅ |
-| Settings persist across restarts | ✅ |
-| Seeking on cached tracks | ✅ |
-| Seeking/pause on remote streams (server must support HTTP Range) | ✅ |
-| Seek fade (fade out/in) | ✅ |
-| Scrobbling (now playing + play counts) | ✅ |
-| "Stream while downloading" gate (hold playback until cached) | ⬜ |
-| Prefetch ahead | ⬜ |
-| Download resume (HTTP Range) + retry | ⬜ |
-| Cache management — size limit + eviction, clear cache, cache info | ⬜ |
-| Restored-playlist self-heal (re-stream + re-cache a dead cache path) | ✅ |
-| Transcoding — stream format + max bitrate | ⬜ |
-| Download folder + cache-size-limit settings | ⬜ |
-| Layout widget (Internet category) | ⬜ |
+| Library browser (**View → Foosonic Browser**) and layout widget (Internet category) | ✅ |
+| Drag-and-drop / menu add to a fooyin playlist, Play Next, Add to Queue | ✅ |
+| Subsonic playlists, and server playlist editing (create / add / rename / delete) | ✅ |
+| Library search and playlist search | ✅ |
+| Server setup; settings persist across restarts | ✅ |
 | Track metadata + cover art in the browser | ✅ |
+| Remote streams are seekable + pausable (HTTP Range) | ✅ |
+| Seeking and pausing on remote streams (server must support HTTP Range) | ✅ |
+| Seek fade (fade out/in) around remote seeks | ✅ |
+| Instant seek from the cached file once a track has downloaded | ✅ |
+| Stream while caching, then play from the local file on pause | ✅ |
+| Prefetch ahead | ✅ |
+| Download resume (HTTP Range) + retry | ✅ |
+| Cache management — size limit + eviction, clear cache, cache info | ✅ |
+| Restored-playlist self-heal (re-stream + re-cache a dead cache path) | ✅ |
+| Transcoding (stream format + max bitrate) | ✅ |
+| Download folder + cache-size-limit settings | ✅ |
+| Scrobbling (now playing + play counts) | ✅ |
+| Star / unstar, random + starred discovery | ✅ |
+| Browser activity line (streaming, caching, switching, added to cache) | ✅ |
+| "Stream while downloading" gate (hold playback until the track is cached) | ⬜ |
 
 ## Install
 
@@ -88,8 +86,8 @@ All under **Settings → Foosonic**:
   cover-art size). Authentication can be token (default), plaintext password, or an OpenSubsonic
   API key.
 - **Playback mode** — *Download first* (default: stream immediately and cache in the background) or
-  *Stream* (play remotely, caching disabled). Cached copy is picked up at track start or when you
-  seek/pause, never by swapping mid-track.
+  *Stream* (play remotely, caching disabled). Once downloaded, seeks read straight from the cached
+  file and pause switches playback to it (never a mid-track swap).
 - **Stream while downloading** — play at once and switch to the cached file at the same position;
   off = wait until the track has downloaded.
 - **Prefetch ahead** — how many upcoming tracks to fetch (default 1).
@@ -105,12 +103,15 @@ All under **Settings → Foosonic**:
   it at a folder inside one of your fooyin library paths so downloads become library tracks.
 
 The browser's **Cache** column shows ✓ cached / ✓ **Downloaded copy** (a permanent library file) /
-↓ downloading with a percentage, the status bar shows download progress, and the settings page shows
-the cache size, file count, and the active download.
+↓ downloading with a percentage. A second status line under the toolbar narrates what the player
+is doing (streaming, caching, switching to the cached file, added to cache), with an animated dots
+indicator while work is in progress. The settings page shows the cache size, file count, and the
+active download.
 
 ## Notes
 
-- A finished background download does not interrupt playback. The local copy is used from the next
-  track start, or when you seek/pause while it is still the current track.
+- A finished background download does not interrupt playback. The track keeps streaming; a seek to
+  already-downloaded audio is served straight from the cached file (no network round-trip), and the
+  local copy is used from the next track start or when you pause.
 - The password (or API key) is stored in fooyin's settings file in plain text.
 - Logs use the `fy.subsonic` category (`QT_LOGGING_RULES="fy.subsonic.debug=true"`).

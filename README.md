@@ -3,6 +3,10 @@
 A [fooyin](https://github.com/fooyin/fooyin) plugin that browses and streams music from a
 Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 
+## Development goal
+
+I am pushing a bunch of new untested features for now, and when the full functionality is achieved I will begin extensive testing and cleanup of the code. Stable version will be published afterwards.
+
 ## Features
 
 Legend: ✅ confirmed working, ⬜ not verified yet.

@@ -45,6 +45,35 @@ public:
     void search(const QString& query, int artistCount, int albumCount, int songCount, SearchCallback callback);
     void ping(std::function<void(const QJsonObject& response, const QString& error)> callback);
 
+    //! Reports a now-playing (@p submission false) or completed-play (@p submission true) event.
+    void scrobble(const QString& id, bool submission);
+
+    //! Star/unstar a song, album or artist by id.
+    void star(const QString& id, bool star);
+    //! Set a 0-5 star rating for @p id (0 clears it).
+    void setRating(const QString& id, int rating);
+
+    //! OpenSubsonic extension names advertised by the server (empty on old servers).
+    void getOpenSubsonicExtensions(ArrayCallback callback);
+    //! Starred songs across artists/albums/songs.
+    void getStarred(ArrayCallback callback);
+    void getRandomSongs(ArrayCallback callback, int count = 50);
+    void getTopSongs(ArrayCallback callback, const QString& artist, int count = 50);
+    void getSimilarSongs(ArrayCallback callback, const QString& id, int count = 50);
+    void getGenres(ArrayCallback callback);
+    void getSongsByGenre(ArrayCallback callback, const QString& genre, int count = 100);
+    //! Synced/plain lyrics by song id (OpenSubsonic `songLyrics`).
+    void getLyricsBySongId(std::function<void(const QString& lyrics, const QString& error)> callback,
+                           const QString& id);
+
+    void createPlaylist(const QString& name, const QStringList& songIds,
+                        std::function<void(bool ok, const QString& error)> callback);
+    void renamePlaylist(const QString& id, const QString& name,
+                        std::function<void(bool ok, const QString& error)> callback);
+    void addToPlaylist(const QString& id, const QStringList& songIds,
+                       std::function<void(bool ok, const QString& error)> callback);
+    void deletePlaylist(const QString& id, std::function<void(bool ok, const QString& error)> callback);
+
     [[nodiscard]] QUrl streamUrl(const QString& id) const;
     [[nodiscard]] QUrl coverArtUrl(const QString& id, int size = 300) const;
 

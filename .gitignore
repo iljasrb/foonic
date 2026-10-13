@@ -1,3 +1,8 @@
 build/
 build-*/
 *.user
+
+# Documentation and development notes; only README.md is tracked.
+/docs/
+*.md
+!README.md

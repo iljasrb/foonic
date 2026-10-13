@@ -1,6 +1,6 @@
 {
     "Name" : "Foosonic",
-    "Version" : "0.3.0",
+    "Version" : "@PROJECT_VERSION@",
     "Author" : "foosonic",
     "Category" : "Online Services",
     "Description" : "Browse and stream music from a Subsonic-compatible server",

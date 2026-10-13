@@ -49,6 +49,8 @@ struct SubsonicSettings
     QString server;
     QString username;
     QString password;
+    QString authMode{QStringLiteral("token")}; // "token", "password", "apiKey"
+    QString apiKey;
     PlaybackMode playbackMode{PlaybackMode::DownloadFirst};
     QString format{QStringLiteral("raw")}; // "raw", "mp3", "opus", "aac"
     int maxBitRate{0};                     // kbps, 0 = unlimited (only used when transcoding)
@@ -59,10 +61,23 @@ struct SubsonicSettings
     bool ignoreSslErrors{false};       // accept self-signed/invalid TLS certificates
     QString musicFolderId;             // limit browsing/search to one server folder; empty = all
     QString libraryDir;                // albums/songs downloaded here are added to the fooyin library
+    int streamBufferMb{64};            // in-memory read buffer for remote streams (whole track if size fits)
+    int remotePrebufferMs{400};        // decoded audio the engine wants buffered before resuming after a seek
+    bool seekFadeEnabled{true};        // fade out/in around remote seeks
+    int seekFadeMs{200};               // seek fade length
+    int coverArtSize{300};             // cover art requested from the server, in px
+    bool scrobblePlays{true};          // report now-playing + play counts back to the server
+    bool playOnlyCached{false};        // never stream; play cached/library copies only
 
     [[nodiscard]] bool isValid() const
     {
-        return !server.trimmed().isEmpty() && !username.trimmed().isEmpty();
+        if(server.trimmed().isEmpty()) {
+            return false;
+        }
+        if(authMode == QStringLiteral("apiKey")) {
+            return !apiKey.trimmed().isEmpty();
+        }
+        return !username.trimmed().isEmpty();
     }
 };
 
@@ -86,6 +101,8 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/Server"), QString{});
     settings->createSetting(QStringLiteral("Subsonic/Username"), QString{});
     settings->createSetting(QStringLiteral("Subsonic/Password"), QString{});
+    settings->createSetting(QStringLiteral("Subsonic/AuthMode"), QStringLiteral("token"));
+    settings->createSetting(QStringLiteral("Subsonic/ApiKey"), QString{});
     settings->createSetting(QStringLiteral("Subsonic/PlaybackMode"), static_cast<int>(PlaybackMode::DownloadFirst));
     settings->createSetting(QStringLiteral("Subsonic/Format"), QStringLiteral("raw"));
     settings->createSetting(QStringLiteral("Subsonic/MaxBitRate"), 0);
@@ -96,6 +113,13 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/IgnoreSslErrors"), false);
     settings->createSetting(QStringLiteral("Subsonic/MusicFolderId"), QString{});
     settings->createSetting(QStringLiteral("Subsonic/LibraryDir"), defaultLibraryDir());
+    settings->createSetting(QStringLiteral("Subsonic/StreamBufferMb"), 64);
+    settings->createSetting(QStringLiteral("Subsonic/RemotePrebufferMs"), 400);
+    settings->createSetting(QStringLiteral("Subsonic/SeekFadeEnabled"), true);
+    settings->createSetting(QStringLiteral("Subsonic/SeekFadeMs"), 200);
+    settings->createSetting(QStringLiteral("Subsonic/CoverArtSize"), 300);
+    settings->createSetting(QStringLiteral("Subsonic/ScrobblePlays"), true);
+    settings->createSetting(QStringLiteral("Subsonic/PlayOnlyCached"), false);
 }
 
 inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
@@ -104,6 +128,11 @@ inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
     result.server       = settings->value(QStringLiteral("Subsonic/Server")).toString();
     result.username     = settings->value(QStringLiteral("Subsonic/Username")).toString();
     result.password     = settings->value(QStringLiteral("Subsonic/Password")).toString();
+    result.authMode     = settings->value(QStringLiteral("Subsonic/AuthMode")).toString();
+    if(result.authMode.isEmpty()) {
+        result.authMode = QStringLiteral("token");
+    }
+    result.apiKey       = settings->value(QStringLiteral("Subsonic/ApiKey")).toString();
     result.playbackMode
         = static_cast<PlaybackMode>(settings->value(QStringLiteral("Subsonic/PlaybackMode")).toInt());
     result.format     = settings->value(QStringLiteral("Subsonic/Format")).toString();
@@ -124,6 +153,13 @@ inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
     if(result.libraryDir.isEmpty()) {
         result.libraryDir = defaultLibraryDir();
     }
+    result.streamBufferMb    = std::clamp(settings->value(QStringLiteral("Subsonic/StreamBufferMb")).toInt(), 8, 1024);
+    result.remotePrebufferMs = std::clamp(settings->value(QStringLiteral("Subsonic/RemotePrebufferMs")).toInt(), 100, 10000);
+    result.seekFadeEnabled   = settings->value(QStringLiteral("Subsonic/SeekFadeEnabled")).toBool();
+    result.seekFadeMs        = std::clamp(settings->value(QStringLiteral("Subsonic/SeekFadeMs")).toInt(), 0, 5000);
+    result.coverArtSize      = std::clamp(settings->value(QStringLiteral("Subsonic/CoverArtSize")).toInt(), 64, 2000);
+    result.scrobblePlays     = settings->value(QStringLiteral("Subsonic/ScrobblePlays")).toBool();
+    result.playOnlyCached    = settings->value(QStringLiteral("Subsonic/PlayOnlyCached")).toBool();
     return result;
 }
 
@@ -132,6 +168,8 @@ inline void saveSubsonicSettings(SettingsManager* settings, const SubsonicSettin
     settings->set(QStringLiteral("Subsonic/Server"), subsonic.server);
     settings->set(QStringLiteral("Subsonic/Username"), subsonic.username);
     settings->set(QStringLiteral("Subsonic/Password"), subsonic.password);
+    settings->set(QStringLiteral("Subsonic/AuthMode"), subsonic.authMode);
+    settings->set(QStringLiteral("Subsonic/ApiKey"), subsonic.apiKey);
     settings->set(QStringLiteral("Subsonic/PlaybackMode"), static_cast<int>(subsonic.playbackMode));
     settings->set(QStringLiteral("Subsonic/Format"), subsonic.format);
     settings->set(QStringLiteral("Subsonic/MaxBitRate"), subsonic.maxBitRate);
@@ -142,5 +180,12 @@ inline void saveSubsonicSettings(SettingsManager* settings, const SubsonicSettin
     settings->set(QStringLiteral("Subsonic/IgnoreSslErrors"), subsonic.ignoreSslErrors);
     settings->set(QStringLiteral("Subsonic/MusicFolderId"), subsonic.musicFolderId);
     settings->set(QStringLiteral("Subsonic/LibraryDir"), subsonic.libraryDir);
+    settings->set(QStringLiteral("Subsonic/StreamBufferMb"), subsonic.streamBufferMb);
+    settings->set(QStringLiteral("Subsonic/RemotePrebufferMs"), subsonic.remotePrebufferMs);
+    settings->set(QStringLiteral("Subsonic/SeekFadeEnabled"), subsonic.seekFadeEnabled);
+    settings->set(QStringLiteral("Subsonic/SeekFadeMs"), subsonic.seekFadeMs);
+    settings->set(QStringLiteral("Subsonic/CoverArtSize"), subsonic.coverArtSize);
+    settings->set(QStringLiteral("Subsonic/ScrobblePlays"), subsonic.scrobblePlays);
+    settings->set(QStringLiteral("Subsonic/PlayOnlyCached"), subsonic.playOnlyCached);
 }
 } // namespace Fooyin::Subsonic

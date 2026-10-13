@@ -92,6 +92,12 @@ private:
     void cancelDragFetch();
     void showContextMenu(const QPoint& pos);
     void showHeaderMenu(const QPoint& pos);
+    void showDiscoveryMenu(const QPoint& pos);
+    void showDiscoverySongs(const QString& title, const QList<QJsonObject>& songs);
+    void createServerPlaylist(const QStringList& songIds);
+    void addSongsToServerPlaylist(const QString& id, const QStringList& songIds);
+    void renameSelectedPlaylist(QTreeWidgetItem* item);
+    void deleteSelectedPlaylist(QTreeWidgetItem* item);
     void playSelection(BrowserAction action);
 
     void loadChildren(QTreeWidgetItem* item, int kind, const QString& id, std::function<void()> onDone = {},
@@ -105,7 +111,9 @@ private:
     void updateLibraryDownloadStatus();
     void applyAction(const TrackList& tracks, BrowserAction action, bool startPlayback);
     [[nodiscard]] Track trackForSong(const QJsonObject& song, const QString& filepath) const;
-    [[nodiscard]] QString cacheText(const QString& songId) const;
+    [[nodiscard]] bool isSongPlayable(const QJsonObject& song) const;
+    [[nodiscard]] QString coverCachePath(const QString& coverArtId) const;
+    [[nodiscard]] QString cacheText(const QJsonObject& song) const;
     void updateDownloadProgress();
     void applyCover(QTreeWidgetItem* item, const QString& coverArtId);
     void requestCover(const QString& coverArtId);
@@ -132,6 +140,10 @@ private:
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     QLabel* m_status;
+    QLabel* m_activity;
+    QLabel* m_dots;
+    QTimer* m_dotsTimer{nullptr};
+    int m_dotsCount{0};
     QTreeWidget* m_tree;
     QLineEdit* m_filter{nullptr};
     QToolButton* m_filterOptions{nullptr};

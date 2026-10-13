@@ -21,20 +21,25 @@
 #include <utils/settings/settingsdialogcontroller.h>
 
 #include <QActionGroup>
+#include <QCryptographicHash>
+#include <QDir>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QTimer>
 #include <QToolButton>
@@ -329,6 +334,8 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     , m_settings{settings}
     , m_client{new SubsonicClient{m_network, loadSubsonicSettings(settings), this}}
     , m_status{new QLabel{this}}
+    , m_activity{new QLabel{this}}
+    , m_dots{new QLabel{this}}
     , m_tree{new SubsonicTreeWidget{this}}
 {
     auto* tree = static_cast<SubsonicTreeWidget*>(m_tree);
@@ -414,10 +421,27 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     m_filterTimer->setInterval(150);
 
     auto* toolbar = new QHBoxLayout;
+    toolbar->setContentsMargins(10, 8, 10, 0);
     toolbar->addWidget(refreshButton);
     toolbar->addWidget(m_status, 1);
     toolbar->addWidget(m_filterOptions);
     toolbar->addWidget(m_filter);
+
+    // Second info row: what the player/cache is doing right now, with an animated busy indicator.
+    m_activity->setTextFormat(Qt::PlainText);
+    m_activity->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_activity->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_activity->setStyleSheet(u"color: palette(mid);"_s);
+    m_activity->setText(tr("Idle."));
+
+    m_dots->setFixedWidth(m_dots->fontMetrics().horizontalAdvance(u"..."_s));
+    m_dots->setStyleSheet(u"color: palette(mid);"_s);
+    m_dotsTimer = new QTimer{this};
+    m_dotsTimer->setInterval(300);
+    connect(m_dotsTimer, &QTimer::timeout, this, [this] {
+        m_dotsCount = (m_dotsCount % 3) + 1;
+        m_dots->setText(QString(m_dotsCount, u'.'));
+    });
 
     m_tree->setHeaderLabels({tr("Name"), tr("Artist"), tr("Album"), tr("Length"), tr("Size"), tr("Cache")});
     m_tree->setUniformRowHeights(true);
@@ -432,9 +456,16 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     m_tree->setDefaultDropAction(Qt::CopyAction);
     m_tree->setToolTip(tr("Drag artists, albums or songs onto a playlist."));
 
+    auto* activityRow = new QHBoxLayout;
+    activityRow->setContentsMargins(10, 0, 10, 6);
+    activityRow->setSpacing(4);
+    activityRow->addWidget(m_dots);
+    activityRow->addWidget(m_activity, 1);
+
     auto* layout = new QVBoxLayout{this};
     layout->setContentsMargins({});
     layout->addLayout(toolbar);
+    layout->addLayout(activityRow);
     layout->addWidget(m_tree, 1);
 
     connect(refreshButton, &QPushButton::clicked, this, &SubsonicBrowser::refresh);
@@ -472,6 +503,21 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     if(m_downloads) {
         connect(m_downloads, &SubsonicDownloadManager::downloadProgressChanged, this,
                 &SubsonicBrowser::updateDownloadProgress);
+        connect(m_downloads, &SubsonicDownloadManager::activityChanged, this,
+                [this](const QString& text, bool busy) {
+                    m_activity->setText(text);
+                    if(busy) {
+                        if(!m_dotsTimer->isActive()) {
+                            m_dotsCount = 1;
+                            m_dots->setText(u"."_s);
+                            m_dotsTimer->start();
+                        }
+                    }
+                    else {
+                        m_dotsTimer->stop();
+                        m_dots->clear();
+                    }
+                });
     }
 
     // Refresh once the (modeless) settings dialog is closed so config changes take effect.
@@ -789,6 +835,16 @@ TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
     };
     collect(items);
 
+    if(settings.playOnlyCached && m_downloads) {
+        QList<QJsonObject> playable;
+        for(const QJsonObject& song : songs) {
+            if(isSongPlayable(song)) {
+                playable.push_back(song);
+            }
+        }
+        songs = playable;
+    }
+
     if(songs.empty()) {
         return {};
     }
@@ -999,7 +1055,7 @@ QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const 
             m_downloads->addDownloadedCopy(songId, song, local, false);
         }
     }
-    child->setText(5, cacheText(songId));
+    child->setText(5, cacheText(song));
     return child;
 }
 
@@ -1074,13 +1130,30 @@ void SubsonicBrowser::finishGather(const std::shared_ptr<GatherState>& state)
         return;
     }
 
+    if(loadSubsonicSettings(m_settings).playOnlyCached) {
+        QList<QJsonObject> playable;
+        for(const QJsonObject& song : state->songs) {
+            if(isSongPlayable(song)) {
+                playable.push_back(song);
+            }
+        }
+        if(playable.size() != state->songs.size()) {
+            qCInfo(SUBSONIC) << "Play-cached-only: skipped" << (state->songs.size() - playable.size())
+                             << "stream(s)";
+        }
+        state->songs = playable;
+        if(state->songs.empty()) {
+            setStatus(tr("Nothing cached to play (play-cached-only is on)."));
+            return;
+        }
+    }
+
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     m_client->setSettings(settings);
 
     qCInfo(SUBSONIC) << "Adding" << state->songs.size() << "track(s), total" << formatBytes(state->bytes)
-                     << "(" << state->bytes << "bytes ), mode="
-                     << (settings.playbackMode == PlaybackMode::DownloadFirst ? "download-first" : "stream")
-                     << "read-ahead=" << m_settings->value(QStringLiteral("Engine/RemoteReadAheadKb")).toInt() << "kB";
+                     << "mode="
+                     << (settings.playbackMode == PlaybackMode::DownloadFirst ? "download-first" : "stream");
 
     if(settings.playbackMode == PlaybackMode::DownloadFirst) {
         downloadAndPlay(state);
@@ -1191,6 +1264,7 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
 {
     QTreeWidgetItem* item = m_tree->itemAt(pos);
     if(!item) {
+        showDiscoveryMenu(pos);
         return;
     }
 
@@ -1207,6 +1281,42 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     QAction* queueAction = menu.addAction(tr("Add to Queue"));
     menu.addSeparator();
     QAction* downloadAction = menu.addAction(tr("Download to Library"));
+    QAction* starAction{nullptr};
+    QAction* unstarAction{nullptr};
+    if(item->data(0, KindRole).toInt() == Song) {
+        menu.addSeparator();
+        starAction   = menu.addAction(tr("Star"));
+        unstarAction = menu.addAction(tr("Unstar"));
+    }
+
+    QStringList songIds;
+    for(QTreeWidgetItem* selected : m_tree->selectedItems()) {
+        if(selected->data(0, KindRole).toInt() == Song) {
+            songIds.push_back(selected->data(0, IdRole).toString());
+        }
+    }
+
+    QHash<QAction*, QString> playlistActions;
+    QAction* newServerPlaylistAction{nullptr};
+    if(!songIds.isEmpty()) {
+        menu.addSeparator();
+        QMenu* addToServer = menu.addMenu(tr("Add to Server Playlist"));
+        for(const QJsonObject& playlist : m_playlists) {
+            playlistActions.insert(addToServer->addAction(playlist.value(u"name"_s).toString()),
+                                   playlist.value(u"id"_s).toString());
+        }
+        addToServer->addSeparator();
+        newServerPlaylistAction = addToServer->addAction(tr("New Playlist..."));
+    }
+
+    QAction* renamePlaylistAction{nullptr};
+    QAction* deletePlaylistAction{nullptr};
+    if(item->data(0, KindRole).toInt() == PlaylistNode) {
+        menu.addSeparator();
+        renamePlaylistAction = menu.addAction(tr("Rename Playlist..."));
+        deletePlaylistAction = menu.addAction(tr("Delete Playlist..."));
+    }
+
     QAction* cancelAction{nullptr};
     if(m_libraryDownloads && m_libraryDownloads->isActive()) {
         cancelAction = menu.addAction(tr("Cancel Download"));
@@ -1229,6 +1339,37 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     else if(chosen == queueAction) {
         playSelection(BrowserAction::AddToQueue);
     }
+    else if(chosen == starAction || chosen == unstarAction) {
+        const bool star = chosen == starAction;
+        m_client->setSettings(loadSubsonicSettings(m_settings));
+        QStringList ids;
+        for(QTreeWidgetItem* selected : m_tree->selectedItems()) {
+            if(selected->data(0, KindRole).toInt() == Song) {
+                ids.push_back(selected->data(0, IdRole).toString());
+            }
+        }
+        if(ids.isEmpty()) {
+            ids.push_back(item->data(0, IdRole).toString());
+        }
+        for(const QString& id : ids) {
+            if(!id.isEmpty()) {
+                m_client->star(id, star);
+            }
+        }
+        setStatus(tr("Starred %1 song(s).").arg(ids.size()));
+    }
+    else if(playlistActions.contains(chosen)) {
+        addSongsToServerPlaylist(playlistActions.value(chosen), songIds);
+    }
+    else if(newServerPlaylistAction && chosen == newServerPlaylistAction) {
+        createServerPlaylist(songIds);
+    }
+    else if(renamePlaylistAction && chosen == renamePlaylistAction) {
+        renameSelectedPlaylist(item);
+    }
+    else if(deletePlaylistAction && chosen == deletePlaylistAction) {
+        deleteSelectedPlaylist(item);
+    }
     else if(chosen == downloadAction) {
         playSelection(BrowserAction::Download);
     }
@@ -1236,6 +1377,141 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
         m_libraryDownloads->cancel();
         setStatus(tr("Download cancelled."));
     }
+}
+
+void SubsonicBrowser::showDiscoveryMenu(const QPoint& pos)
+{
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    if(!settings.isValid()) {
+        setStatus(tr("Configure the server first."));
+        return;
+    }
+    m_client->setSettings(settings);
+
+    QMenu menu{this};
+    QAction* randomAction  = menu.addAction(tr("Random songs"));
+    QAction* starredAction = menu.addAction(tr("Starred songs"));
+
+    QAction* chosen = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    if(!chosen) {
+        return;
+    }
+
+    const auto show = [this](const QString& title, const QJsonArray& items, const QString& error) {
+        if(!error.isEmpty()) {
+            setStatus(error);
+            return;
+        }
+        QList<QJsonObject> songs;
+        songs.reserve(items.size());
+        for(const QJsonValue& value : items) {
+            songs.push_back(value.toObject());
+        }
+        showDiscoverySongs(title, songs);
+    };
+
+    if(chosen == randomAction) {
+        setStatus(tr("Loading random songs..."));
+        m_client->getRandomSongs([show](const QJsonArray& items, const QString& error) {
+            show(tr("Random"), items, error);
+        });
+    }
+    else {
+        setStatus(tr("Loading starred songs..."));
+        m_client->getStarred([show](const QJsonArray& items, const QString& error) {
+            show(tr("Starred"), items, error);
+        });
+    }
+}
+
+void SubsonicBrowser::showDiscoverySongs(const QString& title, const QList<QJsonObject>& songs)
+{
+    if(songs.isEmpty()) {
+        setStatus(tr("%1: no songs.").arg(title));
+        return;
+    }
+
+    auto* header = createResultHeader(tr("%1 (%2)").arg(title).arg(songs.size()));
+    m_tree->insertTopLevelItem(0, header);
+    for(const QJsonObject& song : songs) {
+        createSongItem(header, song);
+    }
+    header->setExpanded(true);
+    m_tree->scrollToItem(header);
+    setStatus(tr("%1: %2 song(s)").arg(title).arg(songs.size()));
+}
+
+void SubsonicBrowser::createServerPlaylist(const QStringList& songIds)
+{
+    bool accepted{false};
+    const QString name = QInputDialog::getText(this, tr("New playlist"), tr("Playlist name:"), QLineEdit::Normal,
+                                               {}, &accepted);
+    if(!accepted || name.trimmed().isEmpty()) {
+        return;
+    }
+
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    m_client->createPlaylist(name.trimmed(), songIds, [this](bool ok, const QString& error) {
+        setStatus(ok ? tr("Playlist created.") : error);
+        if(ok) {
+            refresh();
+        }
+    });
+}
+
+void SubsonicBrowser::addSongsToServerPlaylist(const QString& id, const QStringList& songIds)
+{
+    if(id.isEmpty() || songIds.isEmpty()) {
+        return;
+    }
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    m_client->addToPlaylist(id, songIds, [this](bool ok, const QString& error) {
+        setStatus(ok ? tr("Added to playlist.") : error);
+        if(ok) {
+            refresh();
+        }
+    });
+}
+
+void SubsonicBrowser::renameSelectedPlaylist(QTreeWidgetItem* item)
+{
+    const QString id = item->data(0, IdRole).toString();
+    bool accepted{false};
+    const QString name = QInputDialog::getText(this, tr("Rename playlist"), tr("Playlist name:"), QLineEdit::Normal,
+                                               item->text(0), &accepted);
+    if(!accepted || name.trimmed().isEmpty()) {
+        return;
+    }
+
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    m_client->renamePlaylist(id, name.trimmed(), [this](bool ok, const QString& error) {
+        setStatus(ok ? tr("Playlist renamed.") : error);
+        if(ok) {
+            refresh();
+        }
+    });
+}
+
+void SubsonicBrowser::deleteSelectedPlaylist(QTreeWidgetItem* item)
+{
+    const QString id = item->data(0, IdRole).toString();
+    if(id.isEmpty()) {
+        return;
+    }
+    const auto answer = QMessageBox::question(this, tr("Foosonic"),
+                                              tr("Delete playlist \"%1\" from the server?").arg(item->text(0)),
+                                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if(answer != QMessageBox::Yes) {
+        return;
+    }
+
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    m_client->deletePlaylist(id, [this](bool ok, const QString& error) {
+        setStatus(ok ? tr("Playlist deleted.") : error);
+        if(ok) {
+            refresh();
+        }
+    });
 }
 
 void SubsonicBrowser::showHeaderMenu(const QPoint& pos)
@@ -1290,16 +1566,38 @@ void SubsonicBrowser::playSelection(BrowserAction action)
 Track SubsonicBrowser::trackForSong(const QJsonObject& song, const QString& filepath) const
 {
     const QString coverArt = song.value(u"coverArt"_s).toString();
-    const QString coverUrl = coverArt.isEmpty() ? QString{} : m_client->coverArtUrl(coverArt).toString();
+    const QString coverUrl
+        = coverArt.isEmpty()
+            ? QString{}
+            : m_client->coverArtUrl(coverArt, loadSubsonicSettings(m_settings).coverArtSize).toString();
     return trackFromSong(song, filepath, coverUrl);
 }
 
-QString SubsonicBrowser::cacheText(const QString& songId) const
+bool SubsonicBrowser::isSongPlayable(const QJsonObject& song) const
+{
+    if(!loadSubsonicSettings(m_settings).playOnlyCached || !m_downloads) {
+        return true;
+    }
+    const QString id = song.value(u"id"_s).toString();
+    return !m_downloads->downloadedCopyPath(id).isEmpty() || !m_downloads->localPathForSong(song).isEmpty();
+}
+
+QString SubsonicBrowser::coverCachePath(const QString& coverArtId) const
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+        + QStringLiteral("/foosonic/covers");
+    QDir{}.mkpath(dir);
+    const QByteArray key = QCryptographicHash::hash(coverArtId.toUtf8(), QCryptographicHash::Sha1).toHex();
+    return dir + u'/' + QString::fromLatin1(key) + u".jpg"_s;
+}
+
+QString SubsonicBrowser::cacheText(const QJsonObject& song) const
 {
     if(!m_downloads) {
         return {};
     }
 
+    const QString songId = song.value(u"id"_s).toString();
     if(m_downloads->isDownloadedCopy(songId)) {
         return u"\u2713 Downloaded copy"_s;
     }
@@ -1314,7 +1612,9 @@ QString SubsonicBrowser::cacheText(const QString& songId) const
         case SubsonicDownloadManager::CacheState::NotCached:
             break;
     }
-    return {};
+
+    // Not registered this session (e.g. a fresh browser load after restart); check the disk directly.
+    return m_downloads->localPathForSong(song).isEmpty() ? QString{} : u"\u2713"_s;
 }
 
 void SubsonicBrowser::updateDownloadProgress()
@@ -1325,7 +1625,7 @@ void SubsonicBrowser::updateDownloadProgress()
     while(*it) {
         QTreeWidgetItem* item = *it;
         if(item->data(0, KindRole).toInt() == Song) {
-            const QString text = cacheText(item->data(0, IdRole).toString());
+            const QString text = cacheText(item->data(0, JsonRole).toJsonObject());
             if(item->text(5) != text) {
                 item->setText(5, text);
             }
@@ -1353,6 +1653,15 @@ void SubsonicBrowser::requestCover(const QString& coverArtId)
     if(m_coverRequests.contains(coverArtId)) {
         return;
     }
+
+    // Disk cache first, so a restart doesn't re-fetch every cover.
+    QPixmap pixmap;
+    if(pixmap.load(coverCachePath(coverArtId))) {
+        m_coverCache.insert(coverArtId, pixmap);
+        applyCoverToTree(coverArtId);
+        return;
+    }
+
     m_coverRequests.insert(coverArtId);
 
     QNetworkReply* reply = m_network->get(QNetworkRequest{m_client->coverArtUrl(coverArtId, 64)});
@@ -1360,10 +1669,11 @@ void SubsonicBrowser::requestCover(const QString& coverArtId)
         reply->deleteLater();
 
         if(reply->error() == QNetworkReply::NoError) {
-            QPixmap pixmap;
-            if(pixmap.loadFromData(reply->readAll())) {
-                m_coverCache.insert(coverArtId,
-                                    pixmap.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            QPixmap downloaded;
+            if(downloaded.loadFromData(reply->readAll())) {
+                downloaded = downloaded.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                m_coverCache.insert(coverArtId, downloaded);
+                downloaded.save(coverCachePath(coverArtId), "JPG");
                 applyCoverToTree(coverArtId);
                 // Bound memory; visible rows keep their already-set icons.
                 if(m_coverCache.size() > 1024) {

@@ -77,6 +77,15 @@ private:
     QSpinBox* m_prefetch;
     QSpinBox* m_cacheLimit;
     QLabel* m_cacheInfo;
+    QSpinBox* m_streamBuffer;
+    QSpinBox* m_remotePrebuffer;
+    QCheckBox* m_seekFade;
+    QSpinBox* m_seekFadeMs;
+    QSpinBox* m_coverArtSize;
+    QCheckBox* m_scrobble;
+    QComboBox* m_authMode;
+    QLineEdit* m_apiKey;
+    QCheckBox* m_playOnlyCached;
 };
 } // namespace
 
@@ -101,6 +110,15 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     , m_streamWhileDownloading{new QCheckBox{tr("Stream while downloading"), this}}
     , m_prefetch{new QSpinBox{this}}
     , m_cacheLimit{new QSpinBox{this}}
+    , m_streamBuffer{new QSpinBox{this}}
+    , m_remotePrebuffer{new QSpinBox{this}}
+    , m_seekFade{new QCheckBox{tr("Fade seek"), this}}
+    , m_seekFadeMs{new QSpinBox{this}}
+    , m_coverArtSize{new QSpinBox{this}}
+    , m_scrobble{new QCheckBox{tr("Report now playing and play counts to the server"), this}}
+    , m_authMode{new QComboBox{this}}
+    , m_apiKey{new QLineEdit{this}}
+    , m_playOnlyCached{new QCheckBox{tr("Play cached/downloaded tracks only (never stream)"), this}}
 {
     m_server->setPlaceholderText(u"https://music.example.com"_s);
     m_password->setEchoMode(QLineEdit::Password);
@@ -116,11 +134,18 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     folderRow->addWidget(m_refreshFolders);
 
     auto* connectionForm = new QFormLayout;
+    m_authMode->addItem(tr("Token (recommended)"), u"token"_s);
+    m_authMode->addItem(tr("Password (plain text)"), u"password"_s);
+    m_authMode->addItem(tr("API key"), u"apiKey"_s);
+    m_apiKey->setPlaceholderText(tr("Server API key"));
     connectionForm->addRow(tr("Server URL"), m_server);
     connectionForm->addRow(tr("Username"), m_username);
     connectionForm->addRow(tr("Password"), m_password);
+    connectionForm->addRow(tr("Authentication"), m_authMode);
+    connectionForm->addRow(tr("API key"), m_apiKey);
     connectionForm->addRow({}, m_ignoreSsl);
     connectionForm->addRow(tr("Music folder"), folderRow);
+    connectionForm->addRow(tr("Cover art size"), m_coverArtSize);
 
     auto* testRow = new QHBoxLayout;
     testRow->addWidget(testButton);
@@ -154,12 +179,42 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     m_prefetch->setSpecialValueText(tr("None"));
     m_prefetch->setToolTip(tr("Download this many upcoming tracks ahead of playback."));
 
+    m_streamBuffer->setRange(8, 1024);
+    m_streamBuffer->setSuffix(u" MB"_s);
+    m_streamBuffer->setToolTip(tr("In-memory buffer per remote stream. At least the track size keeps the whole "
+                                  "track in memory, making seeks instant."));
+    m_remotePrebuffer->setRange(100, 10000);
+    m_remotePrebuffer->setSingleStep(100);
+    m_remotePrebuffer->setSuffix(u" ms"_s);
+    m_remotePrebuffer->setToolTip(
+        tr("Audio buffered before playback resumes after a remote seek. Raise it on a slow network."));
+    m_seekFade->setToolTip(tr("Fade out at the current position and fade in at the new one when seeking."));
+    m_seekFadeMs->setRange(0, 2000);
+    m_seekFadeMs->setSingleStep(50);
+    m_seekFadeMs->setSuffix(u" ms"_s);
+    m_coverArtSize->setRange(64, 2000);
+    m_coverArtSize->setSingleStep(64);
+    m_coverArtSize->setSuffix(u" px"_s);
+    m_coverArtSize->setToolTip(tr("Cover art size requested from the server. Larger means sharper but heavier."));
+    auto* fadeRow = new QHBoxLayout;
+    fadeRow->addWidget(m_seekFade);
+    fadeRow->addWidget(m_seekFadeMs);
+    fadeRow->addStretch();
+    auto updateFadeState = [this] { m_seekFadeMs->setEnabled(m_seekFade->isChecked()); };
+    connect(m_seekFade, &QCheckBox::toggled, this, updateFadeState);
+    updateFadeState();
+
     auto* playbackForm = new QFormLayout;
     playbackForm->addRow(tr("Playback mode"), m_mode);
     playbackForm->addRow({}, m_streamWhileDownloading);
     playbackForm->addRow(tr("Prefetch ahead"), m_prefetch);
     playbackForm->addRow(tr("Stream format"), m_format);
     playbackForm->addRow(tr("Max bitrate"), m_maxBitRate);
+    playbackForm->addRow(tr("Stream buffer"), m_streamBuffer);
+    playbackForm->addRow(tr("Remote prebuffer"), m_remotePrebuffer);
+    playbackForm->addRow(tr("Seek fade"), fadeRow);
+    playbackForm->addRow({}, m_scrobble);
+    playbackForm->addRow({}, m_playOnlyCached);
 
     auto* playbackGroup = new QGroupBox{tr("Playback"), this};
     playbackGroup->setLayout(playbackForm);
@@ -219,6 +274,13 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     connect(clearButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::clearCache);
     connect(m_format, &QComboBox::currentIndexChanged, this, &SubsonicSettingsPageWidget::updateBitRateState);
     connect(m_mode, &QComboBox::currentIndexChanged, this, &SubsonicSettingsPageWidget::updateModeState);
+    auto updateAuthState = [this] {
+        const bool apiKey = m_authMode->currentData().toString() == u"apiKey"_s;
+        m_username->setEnabled(!apiKey);
+        m_password->setEnabled(!apiKey);
+        m_apiKey->setEnabled(apiKey);
+    };
+    connect(m_authMode, &QComboBox::currentIndexChanged, this, updateAuthState);
     connect(m_cacheLimit, &QSpinBox::valueChanged, this, &SubsonicSettingsPageWidget::updateCacheInfo);
 
     if(m_downloads) {
@@ -231,6 +293,7 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     updateBitRateState();
     updateModeState();
     updateCacheInfo();
+    updateAuthState();
 }
 
 SubsonicSettings SubsonicSettingsPageWidget::uiSettings() const
@@ -239,6 +302,8 @@ SubsonicSettings SubsonicSettingsPageWidget::uiSettings() const
     settings.server          = m_server->text().trimmed();
     settings.username        = m_username->text().trimmed();
     settings.password        = m_password->text();
+    settings.authMode        = m_authMode->currentData().toString();
+    settings.apiKey          = m_apiKey->text().trimmed();
     settings.ignoreSslErrors = m_ignoreSsl->isChecked();
     settings.musicFolderId   = m_musicFolder->currentData().toString();
     return settings;
@@ -252,6 +317,9 @@ void SubsonicSettingsPageWidget::load()
     m_username->setText(settings.username);
     m_password->setText(settings.password);
     m_ignoreSsl->setChecked(settings.ignoreSslErrors);
+    m_apiKey->setText(settings.apiKey);
+    const int authIndex = m_authMode->findData(settings.authMode);
+    m_authMode->setCurrentIndex(authIndex >= 0 ? authIndex : 0);
 
     m_musicFolder->clear();
     m_musicFolder->addItem(tr("All folders"), QString{});
@@ -272,6 +340,13 @@ void SubsonicSettingsPageWidget::load()
     m_streamWhileDownloading->setChecked(settings.streamWhileDownloading);
     m_prefetch->setValue(settings.prefetchCount);
     m_cacheLimit->setValue(settings.cacheLimitMb);
+    m_streamBuffer->setValue(settings.streamBufferMb);
+    m_remotePrebuffer->setValue(settings.remotePrebufferMs);
+    m_seekFade->setChecked(settings.seekFadeEnabled);
+    m_seekFadeMs->setValue(settings.seekFadeMs);
+    m_coverArtSize->setValue(settings.coverArtSize);
+    m_scrobble->setChecked(settings.scrobblePlays);
+    m_playOnlyCached->setChecked(settings.playOnlyCached);
     setTestStatus({});
     updateBitRateState();
     updateModeState();
@@ -294,6 +369,8 @@ void SubsonicSettingsPageWidget::apply()
     settings.server       = m_server->text().trimmed();
     settings.username     = m_username->text().trimmed();
     settings.password     = m_password->text();
+    settings.authMode     = m_authMode->currentData().toString();
+    settings.apiKey       = m_apiKey->text().trimmed();
     settings.playbackMode = static_cast<PlaybackMode>(m_mode->currentData().toInt());
     settings.format       = m_format->currentData().toString();
     settings.maxBitRate   = (settings.format == "raw"_L1) ? 0 : m_maxBitRate->value();
@@ -302,6 +379,14 @@ void SubsonicSettingsPageWidget::apply()
     settings.streamWhileDownloading = m_streamWhileDownloading->isChecked();
     settings.prefetchCount          = m_prefetch->value();
     settings.cacheLimitMb           = m_cacheLimit->value();
+    settings.streamBufferMb         = m_streamBuffer->value();
+    settings.remotePrebufferMs      = m_remotePrebuffer->value();
+    settings.seekFadeEnabled        = m_seekFade->isChecked();
+    settings.seekFadeMs             = m_seekFadeMs->value();
+    settings.coverArtSize           = m_coverArtSize->value();
+    settings.scrobblePlays          = m_scrobble->isChecked();
+    settings.playOnlyCached         = m_playOnlyCached->isChecked();
+    m_settings->set(QStringLiteral("Engine/RemotePrebufferMs"), settings.remotePrebufferMs);
     settings.ignoreSslErrors        = m_ignoreSsl->isChecked();
     settings.musicFolderId          = m_musicFolder->currentData().toString();
 
@@ -324,6 +409,8 @@ void SubsonicSettingsPageWidget::reset()
     m_server->clear();
     m_username->clear();
     m_password->clear();
+    m_apiKey->clear();
+    m_authMode->setCurrentIndex(0);
     m_ignoreSsl->setChecked(false);
     m_musicFolder->clear();
     m_musicFolder->addItem(tr("All folders"), QString{});
@@ -335,6 +422,13 @@ void SubsonicSettingsPageWidget::reset()
     m_streamWhileDownloading->setChecked(true);
     m_prefetch->setValue(1);
     m_cacheLimit->setValue(0);
+    m_streamBuffer->setValue(64);
+    m_remotePrebuffer->setValue(400);
+    m_seekFade->setChecked(true);
+    m_seekFadeMs->setValue(200);
+    m_coverArtSize->setValue(300);
+    m_scrobble->setChecked(true);
+    m_playOnlyCached->setChecked(false);
     setTestStatus({});
     updateBitRateState();
     updateModeState();

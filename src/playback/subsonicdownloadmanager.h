@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -33,6 +34,7 @@ class Track;
 
 namespace Subsonic {
 class SubsonicClient;
+class SubsonicCacheRegistry;
 
 /*!
  * Fetches Subsonic tracks into a local cache in the background.
@@ -57,7 +59,8 @@ public:
 
     SubsonicDownloadManager(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
                             PlayerController* player, PlaylistHandler* handler,
-                            std::shared_ptr<AudioLoader> audioLoader, QObject* parent = nullptr);
+                            std::shared_ptr<AudioLoader> audioLoader,
+                            std::shared_ptr<SubsonicCacheRegistry> cacheRegistry, QObject* parent = nullptr);
     ~SubsonicDownloadManager() override;
 
     /*!
@@ -80,6 +83,9 @@ public:
     /*! Path of the permanent local library copy for @p songId, or an empty string. */
     [[nodiscard]] QString downloadedCopyPath(const QString& songId) const;
 
+    /*! Existing cache file for @p song, or an empty string. */
+    [[nodiscard]] QString localPathForSong(const QJsonObject& song) const;
+
     /*!
      * Records a music-library download of @p songId at @p path so playback uses the local file and the
      * browser can mark it as a downloaded copy. Supersedes any in-flight cache download of the song.
@@ -91,6 +97,7 @@ public:
     [[nodiscard]] int activeDownloadProgress() const;
     [[nodiscard]] qint64 cacheSizeBytes() const;
     [[nodiscard]] int cachedCount() const;
+    [[nodiscard]] QString cacheDir() const;
 
     /*! Deletes every cached file not currently playing. */
     void clearCache();
@@ -98,6 +105,9 @@ public:
 Q_SIGNALS:
     void cacheStateChanged(const QString& songId);
     void downloadProgressChanged();
+    /*! Short human-readable description of what the player is doing right now (streaming, caching,
+     * switching to the cached file, ...). Meant for a status line in the browser. */
+    void activityChanged(const QString& text, bool busy);
 
 private:
     struct Entry
@@ -110,6 +120,10 @@ private:
     };
 
     void onCurrentTrackChanged(const Track& track);
+    [[nodiscard]] bool recoverMissingCacheTrack(const Track& track);
+    [[nodiscard]] std::optional<Track> remoteTrackForDeadCachePath(const QString& path,
+                                                                   const Track& original) const;
+    void repointDeadCachePaths();
     void cancelDownloads();
     void tryApplyPendingSeek();
     void request(int index, bool priority = false);
@@ -118,12 +132,14 @@ private:
     void handleReadyRead();
     void handleFinished();
     void finishCurrent(bool ok);
-    void embedCoverThenPromote(int index);
+    void embedCover(int index);
     void promoteEntryToLocal(int index);
-    void promoteAtQuietPoint(const Track& localTrack, const QString& remoteUrl, uint64_t position,
-                             std::function<void()> afterCommit);
-    void findQuietPoint(const Track& track, uint64_t startMs, std::function<void(uint64_t)> done);
-    void enableCrossfadeForSwitch();
+    void switchCurrentToCached();
+    void updateSubsonicFade(bool active);
+    void startScrobble(const Track& track);
+    void maybeScrobble(uint64_t positionMs);
+    [[nodiscard]] QString songIdForTrack(const Track& track) const;
+    [[nodiscard]] bool isCachePath(const QString& path) const;
     void evictCacheIfNeeded();
     [[nodiscard]] Track trackForEntry(const Entry& entry) const;
     [[nodiscard]] int indexForPath(const QString& path) const;
@@ -133,6 +149,7 @@ private:
 
     std::shared_ptr<NetworkAccessManager> m_network;
     std::shared_ptr<AudioLoader> m_audioLoader;
+    std::shared_ptr<SubsonicCacheRegistry> m_cacheRegistry;
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     PlayerController* m_player;
@@ -160,12 +177,14 @@ private:
     bool m_rangeChecked{false};
     bool m_sentRange{false};
     qint64 m_lastProgressEmit{0};
-    int m_promoteToken{0};
-    // fooyin's manual-change crossfade is gated on Engine/Crossfading (default off); enable it just
-    // around a cache switch and restore the user's value afterwards.
+    // fooyin's seek/manual crossfade is gated on Engine/Crossfading (off by default); enable it for
+    // remote Subsonic playback and restore the user's values afterwards.
     QTimer* m_crossfadeRestoreTimer{nullptr};
     bool m_crossfadeRestore{false};
     bool m_crossfadeWasEnabled{false};
+    QString m_scrobbleId;
+    uint64_t m_scrobbleAt{0};
+    bool m_scrobbled{false};
     QVariant m_crossfadingValuesRestore;
 };
 } // namespace Subsonic

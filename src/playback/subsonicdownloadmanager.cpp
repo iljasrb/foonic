@@ -8,6 +8,7 @@
 
 #include "subsonicclient.h"
 #include "subsonicsettings.h"
+#include "subsonicstreamutils.h"
 #include "subsonictrack.h"
 
 #include <core/engine/audioloader.h>
@@ -22,18 +23,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QFutureWatcher>
 #include <QMetaObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QUrlQuery>
-#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
-#include <cmath>
-#include <cstdint>
 #include <utility>
 
 using namespace Qt::StringLiterals;
@@ -42,8 +39,6 @@ namespace {
 constexpr int MaxAttempts = 5;
 constexpr int RetryDelayMs = 750;
 constexpr qint64 ProgressEmitIntervalMs = 250;
-// Restarting this close to the start of a track is effectively inaudible, so we can skip the seek.
-constexpr uint64_t ResumeSeekThresholdMs = 1000;
 // A live switch close to the end would interrupt the track for no real benefit; let it finish and use
 // the local copy from the next play onward.
 constexpr uint64_t NearEndSkipMs = 10000;
@@ -51,85 +46,17 @@ constexpr uint64_t NearEndSkipMs = 10000;
 // captured; nudge the restore point forward by that latency so the seekbar doesn't visibly step back.
 constexpr uint64_t SeekDispatchMarginMs = 15;
 
-// Quiet-point handoff: scan this far ahead of the current position for a low-energy moment.
-constexpr int QuietHopMs      = 40;
-constexpr int QuietLookaheadMs = 6000;
-constexpr double QuietRmsThreshold = 0.03; // ~ -30 dBFS
-
-// Root-mean-square of an interleaved PCM buffer (linear, 0..1). Returns 1.0 when the format is unknown.
-double bufferRms(const Fooyin::AudioBuffer& buffer)
+QString songDisplayName(const QJsonObject& song)
 {
-    const Fooyin::AudioFormat format = buffer.format();
-    const int bytesPerSample          = format.bytesPerSample();
-    const int sampleCount             = buffer.sampleCount();
-    const std::byte* data             = buffer.data();
-    if(!data || sampleCount <= 0 || bytesPerSample <= 0) {
-        return 1.0;
+    const QString artist = song.value(u"artist"_s).toString();
+    const QString title  = song.value(u"title"_s).toString();
+    if(artist.isEmpty()) {
+        return title;
     }
-
-    double sum{0};
-    long count{0};
-    const Fooyin::SampleFormat sampleFormat = format.sampleFormat();
-    for(int i{0}; i < sampleCount; ++i) {
-        const std::byte* p = data + static_cast<size_t>(i) * static_cast<size_t>(bytesPerSample);
-        double value{0};
-        switch(sampleFormat) {
-            case(Fooyin::SampleFormat::S16):
-                value = *reinterpret_cast<const int16_t*>(p) / 32768.0;
-                break;
-            case(Fooyin::SampleFormat::S32):
-            case(Fooyin::SampleFormat::S24In32):
-                value = *reinterpret_cast<const int32_t*>(p) / 2147483648.0;
-                break;
-            case(Fooyin::SampleFormat::F32):
-                value = *reinterpret_cast<const float*>(p);
-                break;
-            case(Fooyin::SampleFormat::F64):
-                value = *reinterpret_cast<const double*>(p);
-                break;
-            case(Fooyin::SampleFormat::U8):
-                value = (*reinterpret_cast<const uint8_t*>(p) - 128) / 128.0;
-                break;
-            default:
-                return 1.0;
-        }
-        sum += value * value;
-        ++count;
+    if(title.isEmpty()) {
+        return artist;
     }
-    return count > 0 ? std::sqrt(sum / static_cast<double>(count)) : 1.0;
-}
-
-// Returns the first low-energy timestamp at/after @p startMs, or 0 if none is found in the window.
-uint64_t decodeQuietPoint(const Fooyin::LoadedDecoder& loaded, uint64_t startMs)
-{
-    const Fooyin::AudioFormat format = *loaded.format;
-    Fooyin::AudioDecoder* decoder    = loaded.decoder.get();
-    const size_t hopBytes            = static_cast<size_t>(format.bytesForDuration(QuietHopMs));
-    if(hopBytes == 0) {
-        return 0;
-    }
-
-    decoder->start();
-    decoder->seek(startMs);
-
-    uint64_t pos = startMs;
-    while(pos - startMs < static_cast<uint64_t>(QuietLookaheadMs)) {
-        Fooyin::AudioDecoder::ReadResult result = decoder->readAudio(hopBytes);
-        if(result.status != Fooyin::AudioDecoder::ReadStatus::DecodedAudio || !result.buffer.isValid()) {
-            break;
-        }
-        const double rms = bufferRms(result.buffer);
-        if(rms < QuietRmsThreshold) {
-            return result.buffer.startTime();
-        }
-        const uint64_t duration = result.buffer.duration();
-        const uint64_t next     = result.buffer.startTime() + duration;
-        if(duration == 0 || next <= pos) {
-            break;
-        }
-        pos = next;
-    }
-    return 0;
+    return artist + u" - "_s + title;
 }
 } // namespace
 
@@ -137,10 +64,12 @@ namespace Fooyin::Subsonic {
 SubsonicDownloadManager::SubsonicDownloadManager(std::shared_ptr<NetworkAccessManager> network,
                                                  SettingsManager* settings, PlayerController* player,
                                                  PlaylistHandler* handler, std::shared_ptr<AudioLoader> audioLoader,
+                                                 std::shared_ptr<SubsonicCacheRegistry> cacheRegistry,
                                                  QObject* parent)
     : QObject{parent}
     , m_network{std::move(network)}
     , m_audioLoader{std::move(audioLoader)}
+    , m_cacheRegistry{std::move(cacheRegistry)}
     , m_settings{settings}
     , m_client{new SubsonicClient{m_network, loadSubsonicSettings(settings), this}}
     , m_player{player}
@@ -151,6 +80,21 @@ SubsonicDownloadManager::SubsonicDownloadManager(std::shared_ptr<NetworkAccessMa
                 &SubsonicDownloadManager::onCurrentTrackChanged);
         connect(m_player, &PlayerController::currentTrackSeekableChanged, this,
                 [this](bool) { tryApplyPendingSeek(); });
+        connect(m_player, &PlayerController::positionChanged, this,
+                [this](uint64_t ms) { maybeScrobble(ms); });
+        // fooyin's seek container refreshes the elapsed label only on positionChanged, which the
+        // engine publishes after the new position is prefetched. Republish it immediately so a
+        // remote seek shows the target at once instead of snapping back at the end.
+        connect(m_player, &PlayerController::positionMoved, this, [this](uint64_t ms) {
+            if(m_player && isSubsonicStreamUrl(QUrl{m_player->currentTrack().filepath()})) {
+                m_player->restoreCurrentPosition(ms);
+            }
+        });
+        connect(m_player, &PlayerController::playStateChanged, this, [this](Player::PlayState state) {
+            if(state == Player::PlayState::Paused) {
+                switchCurrentToCached();
+            }
+        });
     }
 }
 
@@ -167,6 +111,11 @@ SubsonicDownloadManager::~SubsonicDownloadManager()
         m_file->close();
         delete m_file;
         m_file = nullptr;
+    }
+    // A settings override left behind by an active remote track must not outlive the plugin.
+    if(m_crossfadeRestore) {
+        m_settings->set(QStringLiteral("Engine/Crossfading"), m_crossfadeWasEnabled);
+        m_settings->set(QStringLiteral("Engine/CrossfadingValues"), m_crossfadingValuesRestore);
     }
 }
 
@@ -213,7 +162,7 @@ QStringList SubsonicDownloadManager::registerSongs(const QList<QJsonObject>& son
 
             const qint64 expected = static_cast<qint64>(song.value(u"size"_s).toDouble());
             const QFileInfo info{entry.path};
-            entry.done = expected > 0 && info.exists() && info.size() == expected;
+            entry.done = info.exists() && info.size() > 0 && (expected <= 0 || info.size() >= expected);
 
             m_entries.push_back(entry);
             index = static_cast<int>(m_entries.size()) - 1;
@@ -323,9 +272,146 @@ void SubsonicDownloadManager::cancelDownloads()
     Q_EMIT downloadProgressChanged();
 }
 
+bool SubsonicDownloadManager::recoverMissingCacheTrack(const Track& track)
+{
+    if(!m_player || track.isRemote() || track.isVirtual() || track.isInArchive()) {
+        return false;
+    }
+
+    const QString path = track.filepath();
+    if(path.isEmpty() || QFileInfo::exists(path) || !isCachePath(path)
+       || songIdFromCachePath(path).isEmpty()) {
+        return false;
+    }
+
+    qCInfo(SUBSONIC) << "Recovering missing cache file" << path << "as remote stream";
+    Q_EMIT activityChanged(tr("Recovering missing cache: %1").arg(QFileInfo{path}.fileName()), true);
+    // Repoints the current dead entry and every other dead cache entry in the playlists, so switching
+    // to a neighbour doesn't fail with "no decoder available" before onCurrentTrackChanged can run.
+    repointDeadCachePaths();
+    return true;
+}
+
+std::optional<Track> SubsonicDownloadManager::remoteTrackForDeadCachePath(const QString& path,
+                                                                          const Track& original) const
+{
+    if(path.isEmpty() || original.isRemote() || original.isVirtual() || original.isInArchive()) {
+        return std::nullopt;
+    }
+    if(!isCachePath(path) || QFileInfo::exists(path)) {
+        return std::nullopt;
+    }
+
+    const QString songId = songIdFromCachePath(path);
+    if(songId.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    if(!settings.isValid()) {
+        return std::nullopt;
+    }
+
+    m_client->setSettings(settings);
+    const QUrl url         = m_client->streamUrl(songId);
+    const QString coverUrl = m_client->coverArtUrl(songId).toString();
+
+    Track remote = original;
+    remote.setFilePath(url.toString());
+    if(!coverUrl.isEmpty()) {
+        remote.replaceExtraTag(QStringLiteral("COVERART"), coverUrl);
+    }
+    return remote;
+}
+
+void SubsonicDownloadManager::repointDeadCachePaths()
+{
+    QHash<QString, Track> remotes; // dead cache path -> recovered remote track
+
+    if(m_player) {
+        const PlaylistTrack current = m_player->currentPlaylistTrack();
+        if(current.isValid()) {
+            const QString path = current.track.filepath();
+            if(!path.isEmpty() && !remotes.contains(path)) {
+                if(const auto remote = remoteTrackForDeadCachePath(path, current.track)) {
+                    remotes.insert(path, *remote);
+                }
+            }
+        }
+    }
+
+    if(m_handler) {
+        for(Playlist* playlist : m_handler->playlists()) {
+            for(const PlaylistTrack& playlistTrack : playlist->playlistTracks()) {
+                const QString path = playlistTrack.track.filepath();
+                if(path.isEmpty() || remotes.contains(path)) {
+                    continue;
+                }
+                if(const auto remote = remoteTrackForDeadCachePath(path, playlistTrack.track)) {
+                    remotes.insert(path, *remote);
+                }
+            }
+        }
+    }
+
+    if(remotes.isEmpty()) {
+        return;
+    }
+
+    // Deferred: replacing playlist entries / re-committing the current track re-enters this object.
+    QMetaObject::invokeMethod(
+        this,
+        [this, remotes] {
+            if(m_handler) {
+                for(Playlist* playlist : m_handler->playlists()) {
+                    PlaylistTrackList playlistTracks = playlist->playlistTracks();
+                    bool changed{false};
+                    for(PlaylistTrack& playlistTrack : playlistTracks) {
+                        const auto it = remotes.constFind(playlistTrack.track.filepath());
+                        if(it != remotes.cend()) {
+                            playlistTrack.track = it.value();
+                            changed             = true;
+                        }
+                    }
+                    if(changed) {
+                        m_handler->replacePlaylistTracks(playlist->id(), playlistTracks,
+                                                         PlaylistTrackChangeSource::External);
+                    }
+                }
+            }
+
+            if(m_player) {
+                PlaylistTrack current = m_player->currentPlaylistTrack();
+                if(current.isValid()) {
+                    const auto it = remotes.constFind(current.track.filepath());
+                    if(it != remotes.cend() && !QFileInfo::exists(current.track.filepath())) {
+                        m_pendingSeekPosition = 0;
+                        m_pendingSeekPath.clear();
+                        current.track = it.value();
+                        m_player->changeCurrentTrack(current, {Player::AdvanceReason::ManualSelection, true});
+                    }
+                }
+            }
+        },
+        Qt::QueuedConnection);
+}
+
 void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
 {
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+
+    // A restored playlist can point at a cache file that has since been evicted; play it remotely
+    // again instead of failing with "no decoder available".
+    if(recoverMissingCacheTrack(track)) {
+        return;
+    }
+
+    if(!track.isRemote() && isCachePath(track.filepath())) {
+        Q_EMIT activityChanged(tr("Playing from cache: %1").arg(track.title()), false);
+    }
+
+    updateSubsonicFade(track.isRemote() && isSubsonicStreamUrl(QUrl{track.filepath()}));
+    startScrobble(track);
 
     // Stream mode never caches, so don't register or download anything (including restored playlists).
     if(settings.playbackMode == PlaybackMode::Stream) {
@@ -333,6 +419,9 @@ void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
         m_priority            = -1;
         m_pendingSeekPosition = 0;
         m_pendingSeekPath.clear();
+        if(track.isRemote()) {
+            Q_EMIT activityChanged(tr("Streaming: %1").arg(track.title()), false);
+        }
         return;
     }
 
@@ -384,6 +473,7 @@ void SubsonicDownloadManager::onCurrentTrackChanged(const Track& track)
     }
 
     qCInfo(SUBSONIC) << "Current track will be cached" << m_entries[index].path;
+    Q_EMIT activityChanged(tr("Streaming & caching: %1").arg(songDisplayName(m_entries[index].song)), true);
     request(index, true);
     for(int j{1}; j <= settings.prefetchCount; ++j) {
         request(index + j);
@@ -462,6 +552,9 @@ int SubsonicDownloadManager::registerRemoteTrack(const Track& track)
     entry.song = song;
     entry.url  = track.filepath();
     entry.path = path;
+    // A restored playlist has no song size, so treat an existing non-empty file as cached instead of
+    // downloading it again on every restart.
+    entry.done = QFileInfo::exists(path) && QFileInfo{path}.size() > 0;
     m_entries.push_back(entry);
     const int index = static_cast<int>(m_entries.size()) - 1;
     m_indexByPath.insert(path, index);
@@ -565,6 +658,13 @@ void SubsonicDownloadManager::processNext()
     }
 
     qCInfo(SUBSONIC) << "Downloading" << entry.path << (resuming ? u"(resuming)"_s : QString{});
+    {
+        const bool isCurrent = m_player && !entry.url.isEmpty()
+                               && m_player->currentTrack().filepath() == entry.url;
+        Q_EMIT activityChanged(isCurrent ? tr("Caching: %1").arg(songDisplayName(entry.song))
+                                         : tr("Caching next: %1").arg(songDisplayName(entry.song)),
+                               true);
+    }
     Q_EMIT cacheStateChanged(entry.song.value(u"id"_s).toString());
     Q_EMIT downloadProgressChanged();
     startRequest();
@@ -689,6 +789,9 @@ void SubsonicDownloadManager::handleFinished()
         ++m_attempts;
         qCWarning(SUBSONIC) << "Download retry" << m_attempts << "at" << m_received << "bytes:"
                             << (error == QNetworkReply::NoError ? u"incomplete"_s : errorString);
+        if(m_active >= 0 && m_active < static_cast<int>(m_entries.size())) {
+            Q_EMIT activityChanged(tr("Retrying download: %1").arg(songDisplayName(m_entries[m_active].song)), true);
+        }
         QTimer::singleShot(RetryDelayMs, this, &SubsonicDownloadManager::startRequest);
         return;
     }
@@ -714,10 +817,15 @@ void SubsonicDownloadManager::finishCurrent(bool ok)
         if(ok) {
             entry.done = true;
             qCInfo(SUBSONIC) << "Downloaded" << entry.path << m_received << "bytes";
-            embedCoverThenPromote(index);
+            Q_EMIT activityChanged(tr("Added to cache: %1").arg(songDisplayName(entry.song)), false);
+            embedCover(index);
             evictCacheIfNeeded();
         }
         else {
+            if(m_cacheRegistry) {
+                m_cacheRegistry->remove(entry.song.value(u"id"_s).toString());
+            }
+            Q_EMIT activityChanged(tr("Download failed: %1").arg(songDisplayName(entry.song)), false);
             QFile::remove(entry.path);
         }
 
@@ -743,16 +851,23 @@ void SubsonicDownloadManager::finishCurrent(bool ok)
     processNext();
 }
 
-void SubsonicDownloadManager::embedCoverThenPromote(int index)
+void SubsonicDownloadManager::embedCover(int index)
 {
     if(index < 0 || index >= static_cast<int>(m_entries.size()) || !m_audioLoader) {
-        promoteEntryToLocal(index);
         return;
     }
 
+    const QString songId = m_entries[index].song.value(u"id"_s).toString();
+    const QString path   = m_entries[index].path;
+    const auto publishToRegistry = [this, songId, path] {
+        if(m_cacheRegistry) {
+            m_cacheRegistry->set(songId, path);
+        }
+    };
+
     const QString coverArt = m_entries[index].song.value(u"coverArt"_s).toString();
     if(coverArt.isEmpty()) {
-        promoteEntryToLocal(index);
+        publishToRegistry();
         return;
     }
 
@@ -760,7 +875,7 @@ void SubsonicDownloadManager::embedCoverThenPromote(int index)
     // cover must be embedded in the file itself; otherwise players fall back to the "no cover" icon.
     m_client->setSettings(loadSubsonicSettings(m_settings));
     QNetworkReply* reply = m_network->get(QNetworkRequest{m_client->coverArtUrl(coverArt, 500)});
-    connect(reply, &QNetworkReply::finished, this, [this, index, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, index, reply, publishToRegistry] {
         reply->deleteLater();
 
         if(reply->error() == QNetworkReply::NoError && index >= 0
@@ -769,9 +884,12 @@ void SubsonicDownloadManager::embedCoverThenPromote(int index)
             const Track track     = trackForEntry(m_entries[index]);
             // Keep any art the file already carries (e.g. a higher-resolution embedded cover).
             if(!data.isEmpty() && m_audioLoader->readTrackCover(track, Track::Cover::Front).isEmpty()) {
-                QString mimeType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+                const QString mimeType
+                    = imageMimeType(data, reply->header(QNetworkRequest::ContentTypeHeader).toString());
                 if(mimeType.isEmpty()) {
-                    mimeType = u"image/jpeg"_s;
+                    qCWarning(SUBSONIC) << "Cover art for" << track.filepath() << "is not an image; skipping";
+                    publishToRegistry();
+                    return;
                 }
                 TrackCovers covers;
                 covers[Track::Cover::Front] = CoverImage{mimeType, data};
@@ -780,8 +898,7 @@ void SubsonicDownloadManager::embedCoverThenPromote(int index)
                 }
             }
         }
-
-        promoteEntryToLocal(index);
+        publishToRegistry();
     });
 }
 
@@ -799,9 +916,9 @@ void SubsonicDownloadManager::promoteEntryToLocal(int index)
     QMetaObject::invokeMethod(
         this,
         [this, entry, localTrack] {
-            const bool isCurrent     = m_player && m_player->currentTrack().filepath() == entry.url;
-            const uint64_t position  = isCurrent ? m_player->currentPosition() : 0;
-            const uint64_t duration  = isCurrent ? m_player->currentTrack().duration() : 0;
+            const bool isCurrent    = m_player && m_player->currentTrack().filepath() == entry.url;
+            const uint64_t position = isCurrent ? m_player->currentPosition() : uint64_t{0};
+            const uint64_t duration = isCurrent ? m_player->currentTrack().duration() : 0;
 
             // Repoint every playlist entry at the local file. This is silent, but it must run after the
             // audible commit so fooyin doesn't re-commit the current track on its own (unfaded).
@@ -845,110 +962,42 @@ void SubsonicDownloadManager::promoteEntryToLocal(int index)
             }
             current.track = localTrack;
 
-            if(position > ResumeSeekThresholdMs) {
-                // Mid-track: hand off at a quiet point and let the engine crossfade so the seam is masked.
-                promoteAtQuietPoint(localTrack, entry.url, position, rewritePlaylists);
-            }
-            else {
-                m_pendingSeekPosition = 0;
-                m_pendingSeekPath.clear();
-                qCInfo(SUBSONIC) << "Promoting current track to cached file" << entry.path
-                                 << "near start; restarting without seek";
-                enableCrossfadeForSwitch();
-                m_player->changeCurrentTrack(current, {Player::AdvanceReason::ManualSelection, true});
-                rewritePlaylists();
-            }
+            // Hand off at the current position; the remote fade (updateSubsonicFade) masks the seam.
+            m_pendingSeekPosition = position;
+            m_pendingSeekBaseMs   = QDateTime::currentMSecsSinceEpoch();
+            m_pendingSeekPath     = localTrack.filepath();
+            qCInfo(SUBSONIC) << "Switching current track to cached file" << entry.path << "at" << position << "ms";
+            Q_EMIT activityChanged(tr("Switching to cached file: %1").arg(songDisplayName(entry.song)), true);
+            m_player->changeCurrentTrack(current, {Player::AdvanceReason::ManualSelection, true});
+            rewritePlaylists();
         },
         Qt::QueuedConnection);
 }
 
-void SubsonicDownloadManager::promoteAtQuietPoint(const Track& localTrack, const QString& remoteUrl,
-                                                  uint64_t position, std::function<void()> afterCommit)
+void SubsonicDownloadManager::switchCurrentToCached()
 {
-    const int token = ++m_promoteToken;
-
-    findQuietPoint(localTrack, position, [this, token, localTrack, remoteUrl, position, afterCommit](uint64_t targetMs) {
-        const auto finish = [afterCommit] {
-            if(afterCommit) {
-                afterCommit();
-            }
-        };
-
-        if(token != m_promoteToken || !m_player || m_player->currentTrack().filepath() != remoteUrl) {
-            finish(); // aborted; still repoint playlists so the entry isn't stranded
-            return;
-        }
-
-        auto doSwitch = [this, token, localTrack, remoteUrl, finish] {
-            if(token != m_promoteToken || !m_player || m_player->currentTrack().filepath() != remoteUrl) {
-                finish();
-                return;
-            }
-
-            PlaylistTrack current = m_player->currentPlaylistTrack();
-            if(!current.isValid()) {
-                finish();
-                return;
-            }
-            current.track         = localTrack;
-            const uint64_t nowPos = m_player->currentPosition();
-            m_pendingSeekPosition = nowPos;
-            m_pendingSeekBaseMs   = QDateTime::currentMSecsSinceEpoch();
-            m_pendingSeekPath     = localTrack.filepath();
-            qCInfo(SUBSONIC) << "Switching to cached file at quiet point" << nowPos << "ms";
-            enableCrossfadeForSwitch();
-            m_player->changeCurrentTrack(current, {Player::AdvanceReason::ManualSelection, true});
-            finish();
-        };
-
-        if(targetMs == 0 || targetMs <= position) {
-            qCInfo(SUBSONIC) << "No quiet point found; switching immediately";
-            doSwitch();
-            return;
-        }
-
-        qCInfo(SUBSONIC) << "Found quiet point at" << targetMs << "ms; scheduling cache switch";
-        const qint64 delay
-            = std::max<qint64>(0, static_cast<qint64>(targetMs) - static_cast<qint64>(m_player->currentPosition()));
-        QTimer::singleShot(delay, this, doSwitch);
-    });
-}
-
-void SubsonicDownloadManager::findQuietPoint(const Track& track, uint64_t startMs,
-                                             std::function<void(uint64_t)> done)
-{
-    if(!m_audioLoader) {
-        done(0);
+    if(!m_player) {
         return;
     }
 
-    auto* loaded = new LoadedDecoder{m_audioLoader->loadDecoderForTrack(track, AudioDecoder::None,
-                                                                        AudioDecoder::NoHints)};
-    if(!loaded->decoder || !loaded->format || !loaded->decoder->allowsConcurrentDecoding()) {
-        delete loaded;
-        done(0);
-        return;
+    const QString currentPath = m_player->currentTrack().filepath();
+    if(!isSubsonicStreamUrl(QUrl{currentPath})) {
+        return; // already playing from a local file, or not a Subsonic stream
     }
 
-    auto* watcher = new QFutureWatcher<uint64_t>{this};
-    connect(watcher, &QFutureWatcher<uint64_t>::finished, this, [this, watcher, loaded, done] {
-        const uint64_t target = watcher->result();
-        delete loaded;
-        watcher->deleteLater();
-        done(target);
-    });
-
-    const LoadedDecoder* decoder = loaded;
-    watcher->setFuture(QtConcurrent::run([decoder, startMs] { return decodeQuietPoint(*decoder, startMs); }));
+    for(int i{0}; i < static_cast<int>(m_entries.size()); ++i) {
+        if(m_entries[i].url == currentPath && m_entries[i].done) {
+            promoteEntryToLocal(i);
+            return;
+        }
+    }
 }
 
-void SubsonicDownloadManager::enableCrossfadeForSwitch()
+void SubsonicDownloadManager::updateSubsonicFade(bool active)
 {
-    // fooyin fades/crossfades a manual track change only when Engine/Crossfading is on (off by
-    // default). A hard decoder cut is the audible pop, so enable it just around the switch and
-    // restore the user's own value afterwards. The post-switch position restore uses a very short
-    // crossfade seek so the jump is inaudible without taking the simple-seek path, which can leave
-    // the output fader stuck and silence subsequent tracks.
+    // Remote Subsonic seeking is a hard cut unless fooyin's crossfade is on. Turn it on for remote
+    // Subsonic playback (fade out old position, fade in new) and restore the user's settings after.
+    // autoChange stays off so normal/gapless track transitions are untouched.
     const QString crossfadeKey = QStringLiteral("Engine/Crossfading");
     const QString valuesKey    = QStringLiteral("Engine/CrossfadingValues");
 
@@ -956,31 +1005,96 @@ void SubsonicDownloadManager::enableCrossfadeForSwitch()
         m_crossfadeRestoreTimer = new QTimer{this};
         m_crossfadeRestoreTimer->setSingleShot(true);
         connect(m_crossfadeRestoreTimer, &QTimer::timeout, this, [this, crossfadeKey, valuesKey] {
+            if(!m_crossfadeRestore) {
+                return;
+            }
             m_settings->set(crossfadeKey, m_crossfadeWasEnabled);
             m_settings->set(valuesKey, m_crossfadingValuesRestore);
             m_crossfadeRestore = false;
         });
     }
 
-    if(!m_crossfadeRestore) {
-        m_crossfadeWasEnabled        = m_settings->value(crossfadeKey).toBool();
-        m_crossfadingValuesRestore   = m_settings->value(valuesKey);
-        m_crossfadeRestore           = true;
-        qCInfo(SUBSONIC) << "Enabling fooyin crossfade for cache switch (was" << m_crossfadeWasEnabled
-                         << ")";
+    if(active) {
+        m_crossfadeRestoreTimer->stop();
+        if(!m_crossfadeRestore) {
+            m_crossfadeWasEnabled      = m_settings->value(crossfadeKey).toBool();
+            m_crossfadingValuesRestore = m_settings->value(valuesKey);
+            m_crossfadeRestore         = true;
+        }
+
+        auto values = m_settings->value(valuesKey).value<Engine::CrossfadingValues>();
+        const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+        const int fadeMs = std::clamp(settings.seekFadeMs, 0, 5000);
+        values.seek = {.in = fadeMs, .out = fadeMs, .curve = Engine::FadeCurve::Linear, .enabled = settings.seekFadeEnabled};
+        values.manualChange.enabled = true;
+        values.manualChange.in      = 150;
+        values.manualChange.out     = 150;
+        values.autoChange.enabled   = false;
+        m_settings->set(crossfadeKey, true);
+        m_settings->set(valuesKey, QVariant::fromValue(values));
+    }
+    else if(m_crossfadeRestore) {
+        // Let an in-flight manual/seek fade finish before restoring the user's settings.
+        m_crossfadeRestoreTimer->start(1000);
+    }
+}
+
+QString SubsonicDownloadManager::songIdForTrack(const Track& track) const
+{
+    const QUrl url{track.filepath()};
+    if(isSubsonicStreamUrl(url)) {
+        return QUrlQuery{url}.queryItemValue(u"id"_s);
+    }
+    return isCachePath(track.filepath()) ? songIdFromCachePath(track.filepath()) : QString{};
+}
+
+bool SubsonicDownloadManager::isCachePath(const QString& path) const
+{
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    const QString configured = QDir::cleanPath(settings.downloadDir.isEmpty() ? defaultDownloadDir()
+                                                                              : settings.downloadDir);
+    const QString fallback   = QDir::cleanPath(defaultDownloadDir());
+    const QString active     = m_dir.isEmpty() ? QString{} : QDir::cleanPath(m_dir);
+    return (!configured.isEmpty() && path.startsWith(configured + u'/'))
+        || (!fallback.isEmpty() && path.startsWith(fallback + u'/'))
+        || (!active.isEmpty() && path.startsWith(active + u'/'));
+}
+
+void SubsonicDownloadManager::startScrobble(const Track& track)
+{
+    m_scrobbleId.clear();
+    m_scrobbleAt = 0;
+    m_scrobbled   = false;
+
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    if(!settings.scrobblePlays) {
+        return;
     }
 
-    auto values = m_crossfadingValuesRestore.value<Engine::CrossfadingValues>();
-    // ~60 ms crossfades: enough to mask the decoder cut on most systems, short enough to feel instant.
-    values.manualChange.enabled = true;
-    values.manualChange.in      = 60;
-    values.manualChange.out     = 60;
-    values.seek.enabled         = true;
-    values.seek.in              = 60;
-    values.seek.out             = 60;
-    m_settings->set(crossfadeKey, true);
-    m_settings->set(valuesKey, QVariant::fromValue(values));
-    m_crossfadeRestoreTimer->start(4000);
+    const QString id = songIdForTrack(track);
+    if(id.isEmpty()) {
+        return;
+    }
+
+    // Report the play when half the track is done, or after four minutes for long tracks.
+    const uint64_t duration = track.duration();
+    m_scrobbleAt = duration > 0 ? std::min<uint64_t>(duration / 2, 4ULL * 60 * 1000) : 4ULL * 60 * 1000;
+    m_scrobbleId = id;
+
+    m_client->setSettings(settings);
+    m_client->scrobble(id, false); // now playing
+    qCDebug(SUBSONIC) << "Now playing" << id << "scrobble at" << m_scrobbleAt << "ms";
+}
+
+void SubsonicDownloadManager::maybeScrobble(uint64_t positionMs)
+{
+    if(m_scrobbled || m_scrobbleId.isEmpty() || positionMs < m_scrobbleAt) {
+        return;
+    }
+
+    m_scrobbled = true;
+    m_client->scrobble(m_scrobbleId, true);
+    qCDebug(SUBSONIC) << "Scrobbled" << m_scrobbleId;
 }
 
 void SubsonicDownloadManager::evictCacheIfNeeded()
@@ -1040,6 +1154,9 @@ void SubsonicDownloadManager::evictCacheIfNeeded()
         for(Entry& entry : m_entries) {
             if(entry.path == info.absoluteFilePath()) {
                 entry.done = false;
+                if(m_cacheRegistry) {
+                    m_cacheRegistry->remove(entry.song.value(u"id"_s).toString());
+                }
                 Q_EMIT cacheStateChanged(entry.song.value(u"id"_s).toString());
             }
         }
@@ -1083,6 +1200,19 @@ QString SubsonicDownloadManager::downloadedCopyPath(const QString& songId) const
         return {};
     }
     return m_entries[index].path;
+}
+
+QString SubsonicDownloadManager::localPathForSong(const QJsonObject& song) const
+{
+    const QString dir = cacheDir();
+    if(dir.isEmpty()) {
+        return {};
+    }
+    const QString path = pathForSong(song, dir);
+    const QFileInfo info{path};
+    // Cover embedding grows the file, so "at least the expected size" means complete.
+    const qint64 expected = static_cast<qint64>(song.value(u"size"_s).toDouble());
+    return info.exists() && info.size() > 0 && (expected <= 0 || info.size() >= expected) ? path : QString{};
 }
 
 void SubsonicDownloadManager::addDownloadedCopy(const QString& songId, const QJsonObject& song, const QString& path,
@@ -1146,6 +1276,9 @@ void SubsonicDownloadManager::addDownloadedCopy(const QString& songId, const QJs
     if(notify) {
         Q_EMIT cacheStateChanged(songId);
         Q_EMIT downloadProgressChanged();
+        if(m_player && songId == songIdForTrack(m_player->currentTrack())) {
+            Q_EMIT activityChanged(tr("Playing downloaded copy: %1").arg(songDisplayName(song)), false);
+        }
     }
 }
 
@@ -1186,9 +1319,10 @@ int SubsonicDownloadManager::activeDownloadProgress() const
 qint64 SubsonicDownloadManager::cacheSizeBytes() const
 {
     qint64 total{0};
-    for(const Entry& entry : m_entries) {
-        if(entry.done) {
-            total += QFileInfo{entry.path}.size();
+    const QDir dir{cacheDir()};
+    for(const QFileInfo& info : dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot)) {
+        if(!songIdFromCachePath(info.fileName()).isEmpty()) {
+            total += info.size();
         }
     }
     return total;
@@ -1196,8 +1330,20 @@ qint64 SubsonicDownloadManager::cacheSizeBytes() const
 
 int SubsonicDownloadManager::cachedCount() const
 {
-    return static_cast<int>(std::count_if(m_entries.cbegin(), m_entries.cend(),
-                                          [](const Entry& entry) { return entry.done; }));
+    int count{0};
+    const QDir dir{cacheDir()};
+    for(const QFileInfo& info : dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot)) {
+        if(!songIdFromCachePath(info.fileName()).isEmpty()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+QString SubsonicDownloadManager::cacheDir() const
+{
+    const QString dir = m_dir.isEmpty() ? loadSubsonicSettings(m_settings).downloadDir : m_dir;
+    return dir.isEmpty() ? defaultDownloadDir() : dir;
 }
 
 void SubsonicDownloadManager::clearCache()
@@ -1219,6 +1365,11 @@ void SubsonicDownloadManager::clearCache()
             continue;
         }
         QFile::remove(path);
+        if(m_cacheRegistry) {
+            if(const QString id = songIdFromCachePath(info.fileName()); !id.isEmpty()) {
+                m_cacheRegistry->remove(id);
+            }
+        }
     }
 
     for(Entry& entry : m_entries) {
@@ -1242,22 +1393,6 @@ int SubsonicDownloadManager::indexForSongId(const QString& songId) const
 
 QString SubsonicDownloadManager::pathForSong(const QJsonObject& song, const QString& dir) const
 {
-    const QString id = song.value(u"id"_s).toString();
-    QString name     = song.value(u"artist"_s).toString() + u" - "_s + song.value(u"title"_s).toString();
-    name             = name.trimmed();
-    if(name.isEmpty()) {
-        name = id;
-    }
-
-    static const QRegularExpression Invalid{QStringLiteral(R"([\\/:*?"<>|\x00-\x1f])")};
-    name.replace(Invalid, u"_"_s);
-    name = name.left(180);
-
-    QString suffix = song.value(u"suffix"_s).toString();
-    if(suffix.isEmpty()) {
-        suffix = u"bin"_s;
-    }
-
-    return dir + u"/"_s + name + u" ["_s + id + u"]."_s + suffix;
+    return dir + u"/"_s + subsonicCacheFileName(song);
 }
 } // namespace Fooyin::Subsonic

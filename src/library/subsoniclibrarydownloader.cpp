@@ -8,6 +8,7 @@
 
 #include "subsonicclient.h"
 #include "subsonicsettings.h"
+#include "subsonicstreamutils.h"
 #include "subsonictrack.h"
 
 #include <core/engine/audioloader.h>
@@ -394,17 +395,20 @@ void SubsonicLibraryDownloader::embedCover()
         if(!m_cancel && reply->error() == QNetworkReply::NoError) {
             const QByteArray data = reply->readAll();
             if(!data.isEmpty()) {
-                QString mimeType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+                const QString mimeType
+                    = imageMimeType(data, reply->header(QNetworkRequest::ContentTypeHeader).toString());
                 if(mimeType.isEmpty()) {
-                    mimeType = u"image/jpeg"_s;
+                    qCWarning(SUBSONIC) << "Cover art for" << m_current.path << "is not an image; skipping";
                 }
-                const Track track = trackFromSong(m_current.song, m_current.path);
-                // Keep any cover the file already has.
-                if(m_audioLoader->readTrackCover(track, Track::Cover::Front).isEmpty()) {
-                    TrackCovers covers;
-                    covers[Track::Cover::Front] = CoverImage{mimeType, data};
-                    if(!m_audioLoader->writeTrackCover(track, covers, AudioReader::Metadata)) {
-                        qCWarning(SUBSONIC) << "Could not embed cover in" << m_current.path;
+                else {
+                    const Track track = trackFromSong(m_current.song, m_current.path);
+                    // Keep any cover the file already has.
+                    if(m_audioLoader->readTrackCover(track, Track::Cover::Front).isEmpty()) {
+                        TrackCovers covers;
+                        covers[Track::Cover::Front] = CoverImage{mimeType, data};
+                        if(!m_audioLoader->writeTrackCover(track, covers, AudioReader::Metadata)) {
+                            qCWarning(SUBSONIC) << "Could not embed cover in" << m_current.path;
+                        }
                     }
                 }
             }

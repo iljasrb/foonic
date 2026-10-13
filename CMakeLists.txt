@@ -16,6 +16,9 @@ create_fooyin_plugin(
             src/client/subsonicclient.h
             src/playback/subsonicdownloadmanager.cpp
             src/playback/subsonicdownloadmanager.h
+            src/playback/subsonicremoteplayback.cpp
+            src/playback/subsonicremoteplayback.h
+            src/playback/subsonicstreamutils.h
             src/library/subsoniclibrarydownloader.cpp
             src/library/subsoniclibrarydownloader.h
             src/browser/subsonicbrowser.cpp
@@ -39,3 +42,13 @@ target_include_directories(
             src/browser
             src/plugin
 )
+
+# Optional self-check for the pure parsing helpers (off by default).
+option(FOOSONIC_BUILD_TESTS "Build foosonic tests" OFF)
+if(FOOSONIC_BUILD_TESTS)
+    enable_testing()
+    add_executable(foosonic_streamutils_test tests/subsonicstreamutils_test.cpp)
+    target_link_libraries(foosonic_streamutils_test PRIVATE Fooyin::Core)
+    target_include_directories(foosonic_streamutils_test PRIVATE src/playback)
+    add_test(NAME subsonic_streamutils COMMAND foosonic_streamutils_test)
+endif()

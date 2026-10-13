@@ -10,8 +10,10 @@
 #include "subsonicdialog.h"
 #include "subsonicdownloadmanager.h"
 #include "subsoniclibrarydownloader.h"
+#include "subsonicremoteplayback.h"
 #include "subsonicsettings.h"
 #include "subsonicsettingspage.h"
+#include "subsonicstreamutils.h"
 
 #include <core/network/networkaccessmanager.h>
 
@@ -36,27 +38,23 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
 
     registerSubsonicSettings(m_settings);
 
+    // Subsonic streams are plain http(s), which fooyin hard-codes as non-seekable. Install a seekable
+    // HTTP-Range device and a decoder that keeps using fooyin's FFmpeg backend through it. The device
+    // also consults the shared cache registry so a completed cache download is served from disk.
+    auto cacheRegistry = std::make_shared<SubsonicCacheRegistry>();
+    registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings, cacheRegistry);
+
     m_downloads = new SubsonicDownloadManager{m_network, m_settings, context.playerController,
-                                              context.playlistHandler, context.audioLoader, this};
+                                              context.playlistHandler, context.audioLoader, cacheRegistry, this};
 
     m_libraryDownloads = new SubsonicLibraryDownloader{m_network, m_settings, context.audioLoader,
                                                        context.library, this};
 
-    // With the stock 2 MB read-ahead, fooyin throttles a remote file to playback speed, so the
-    // HTTP connection stays open for the whole track. Servers/proxies in front of Subsonic
-    // (e.g. Cloudflare/Caddy) often cut such long-lived streams, after which playback stops.
-    // Buffering enough to pull the track down up-front finishes the transfer before that happens.
-    // Live radio is unaffected (its server sends at real time, so the buffer stays small).
-    // ponytail: only touch the stock default so an explicit user choice in Advanced settings wins.
-    if(m_settings->value(QStringLiteral("Engine/RemoteReadAheadKb")).toInt() == 2048) {
-        m_settings->set(QStringLiteral("Engine/RemoteReadAheadKb"), 131072); // 128 MB
-        qCInfo(SUBSONIC) << "Raised remote read-ahead from 2048 kB to 131072 kB so Subsonic tracks download "
-                            "up-front and finish before any proxy timeout";
-    }
-    else {
-        qCInfo(SUBSONIC) << "Remote read-ahead is"
-                         << m_settings->value(QStringLiteral("Engine/RemoteReadAheadKb")).toInt() << "kB";
-    }
+    // Subsonic stream buffering now lives in SubsonicStreamDevice, so fooyin's global remote
+    // read-ahead no longer applies to Subsonic tracks. Keep the engine's remote resume threshold in
+    // sync with the plugin setting (it also has to be re-applied when the setting changes).
+    m_settings->set(QStringLiteral("Engine/RemotePrebufferMs"),
+                    loadSubsonicSettings(m_settings).remotePrebufferMs);
 }
 
 void SubsonicPlugin::initialise(const GuiPluginContext& context)

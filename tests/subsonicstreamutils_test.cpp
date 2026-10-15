@@ -41,33 +41,6 @@ int main()
     assert(malformed.start == -1);
     assert(malformed.total == -1);
 
-    assert(songIdFromCachePath(QStringLiteral("/cache/subsonic/Moe Shop - Superstar [tr-4236].flac"))
-           == QStringLiteral("tr-4236"));
-    assert(songIdFromCachePath(QStringLiteral("C:/cache/DJ Myosuke - GOJO [tr-4200].mp3"))
-           == QStringLiteral("tr-4200"));
-    assert(songIdFromCachePath(QStringLiteral("/music/plain.flac")).isEmpty());
-    assert(songIdFromCachePath(QStringLiteral("/cache/[no-extension]")).isEmpty());
-
-    const QJsonObject song{
-        {QStringLiteral("id"), QStringLiteral("tr-4802")},
-        {QStringLiteral("artist"), QStringLiteral("Iwakura")},
-        {QStringLiteral("title"), QStringLiteral("Hatred")},
-        {QStringLiteral("suffix"), QStringLiteral("flac")},
-    };
-    const QString fileName = subsonicCacheFileName(song);
-    assert(fileName == QStringLiteral("Iwakura - Hatred [tr-4802].flac"));
-    assert(songIdFromCachePath(QStringLiteral("/home/user/.cache/fooyin/subsonic/") + fileName)
-           == QStringLiteral("tr-4802"));
-
-    const QJsonObject gojo{
-        {QStringLiteral("id"), QStringLiteral("tr-4200")},
-        {QStringLiteral("artist"), QStringLiteral("DJ Myosuke")},
-        {QStringLiteral("title"), QStringLiteral("GOJO")},
-        {QStringLiteral("suffix"), QStringLiteral("flac")},
-    };
-    assert(subsonicCacheFileName(gojo) == QStringLiteral("DJ Myosuke - GOJO [tr-4200].flac"));
-    assert(songIdFromCachePath(subsonicCacheFileName(gojo)) == QStringLiteral("tr-4200"));
-
     assert(imageMimeType(QByteArrayLiteral("\xFF\xD8\xFF\x00"), {}) == QStringLiteral("image/jpeg"));
     assert(imageMimeType(QByteArrayLiteral("\x89PNG\r\n\x1a\n"), {}) == QStringLiteral("image/png"));
     assert(imageMimeType(QByteArrayLiteral("{\"error\":1}"), QStringLiteral("application/json")).isEmpty());

@@ -19,8 +19,6 @@
 #include <core/track.h>
 
 #include <QByteArray>
-#include <QFile>
-#include <QFileInfo>
 #include <QIODevice>
 #include <QMetaObject>
 #include <QNetworkAccessManager>
@@ -167,18 +165,15 @@ class SubsonicStreamDevice : public QIODevice, public RemoteStreamDevice
 {
 public:
     SubsonicStreamDevice(std::shared_ptr<NetworkAccessManager> network, QUrl url, bool ignoreSslErrors,
-                         qsizetype bufferBytes, std::shared_ptr<SubsonicCacheRegistry> cacheRegistry,
-                         QObject* parent = nullptr)
+                         qsizetype bufferBytes, QObject* parent = nullptr)
         : QIODevice{parent}
         , m_network{std::move(network)}
         , m_url{std::move(url)}
         , m_ignoreSslErrors{ignoreSslErrors}
         , m_bufferBytes{bufferBytes}
-        , m_cacheRegistry{std::move(cacheRegistry)}
         , m_state{std::make_shared<StreamState>()}
     {
         m_state->maxBytes = bufferBytes;
-        m_cacheSongId = QUrlQuery{m_url}.queryItemValue(QStringLiteral("id"));
     }
 
     ~SubsonicStreamDevice() override
@@ -193,45 +188,30 @@ public:
 
     [[nodiscard]] qint64 size() const override
     {
-        if(m_usingCache) {
-            return m_cacheFile.size();
-        }
         const std::scoped_lock lock{m_state->mutex};
         return m_state->total;
     }
 
     [[nodiscard]] qint64 bytesAvailable() const override
     {
-        if(m_usingCache) {
-            return m_cacheFile.bytesAvailable();
-        }
         const std::scoped_lock lock{m_state->mutex};
         return m_state->buffered();
     }
 
     [[nodiscard]] bool canSeek() const
     {
-        if(m_usingCache) {
-            return true;
-        }
         const std::scoped_lock lock{m_state->mutex};
         return m_state->canSeek();
     }
 
     [[nodiscard]] bool readWouldBlock() const override
     {
-        if(m_usingCache) {
-            return false; // disk reads never block
-        }
         const std::scoped_lock lock{m_state->mutex};
         return m_state->nonBlocking && m_state->readWouldBlock;
     }
 
     [[nodiscard]] qsizetype bufferedByteCount() const override
     {
-        if(m_usingCache) {
-            return static_cast<qsizetype>(m_cacheFile.bytesAvailable());
-        }
         const std::scoped_lock lock{m_state->mutex};
         return m_state->buffered();
     }
@@ -328,8 +308,6 @@ public:
                 }
             });
         }
-        m_cacheFile.close();
-        m_usingCache = false;
         QIODevice::close();
     }
 
@@ -340,33 +318,6 @@ public:
         }
         if(pos == QIODevice::pos()) {
             return true;
-        }
-
-        // Serve from the completed on-disk cache when it covers the target: instant and no network.
-        // The registry only ever holds whole files, so reads never fall short.
-        if(m_usingCache || (m_cacheRegistry && !m_cacheSongId.isEmpty())) {
-            const QString cachePath = m_usingCache ? m_cacheFile.fileName()
-                                                   : m_cacheRegistry->pathFor(m_cacheSongId);
-            if(!cachePath.isEmpty()) {
-                const QFileInfo info{cachePath};
-                if(info.exists() && pos < info.size()) {
-                    if(m_cacheFile.fileName() != cachePath) {
-                        m_cacheFile.close();
-                        m_cacheFile.setFileName(cachePath);
-                        static_cast<void>(m_cacheFile.open(QIODevice::ReadOnly));
-                    }
-                    if(m_cacheFile.isOpen() && m_cacheFile.seek(pos)) {
-                        if(!m_usingCache) {
-                            m_usingCache = true;
-                            abortActiveReply();
-                        }
-                        qCDebug(SUBSONIC) << "seek" << pos << "served from cache file" << cachePath;
-                        return QIODevice::seek(pos);
-                    }
-                }
-            }
-            // Cache file no longer usable; fall through to the network path.
-            m_usingCache = false;
         }
 
         bool handled{false};
@@ -444,25 +395,6 @@ public:
         return QIODevice::seek(pos);
     }
 
-private:
-    void abortActiveReply()
-    {
-        QPointer<QNetworkReply> reply;
-        {
-            const std::scoped_lock lock{m_state->mutex};
-            reply = m_state->reply;
-            m_state->reply.clear();
-        }
-        if(reply) {
-            QMetaObject::invokeMethod(m_network.get(), [reply] {
-                if(reply) {
-                    reply->abort();
-                    reply->deleteLater();
-                }
-            });
-        }
-    }
-
 protected:
     qint64 readData(char* data, qint64 maxSize) override
     {
@@ -472,14 +404,6 @@ protected:
         if(QThread::currentThread() == m_network->thread()) {
             setErrorString(QStringLiteral("Subsonic stream cannot be read from the network thread."));
             return -1;
-        }
-
-        if(m_usingCache) {
-            const qint64 read = m_cacheFile.read(data, maxSize);
-            if(read < 0) {
-                setErrorString(m_cacheFile.errorString());
-            }
-            return read;
         }
 
         std::unique_lock lock{m_state->mutex};
@@ -669,10 +593,6 @@ private:
     QUrl m_url;
     bool m_ignoreSslErrors;
     qsizetype m_bufferBytes{DefaultBufferBytes};
-    std::shared_ptr<SubsonicCacheRegistry> m_cacheRegistry;
-    QString m_cacheSongId;
-    QFile m_cacheFile;
-    bool m_usingCache{false};
     std::shared_ptr<StreamState> m_state;
 };
 
@@ -680,12 +600,10 @@ class SubsonicRemoteSourceProvider : public RemoteSourceProvider
 {
 public:
     SubsonicRemoteSourceProvider(std::shared_ptr<NetworkAccessManager> network,
-                                 std::shared_ptr<RemoteIoService> fallback, SettingsManager* settings,
-                                 std::shared_ptr<SubsonicCacheRegistry> cacheRegistry)
+                                 std::shared_ptr<RemoteIoService> fallback, SettingsManager* settings)
         : m_network{std::move(network)}
         , m_fallback{std::move(fallback)}
         , m_settings{settings}
-        , m_cacheRegistry{std::move(cacheRegistry)}
     { }
 
     [[nodiscard]] RemoteStreamSource createStreamSource(const QUrl& url) const override
@@ -700,8 +618,7 @@ public:
         const qsizetype bufferBytes = static_cast<qsizetype>(settings.streamBufferMb) * 1024 * 1024;
 
         RemoteStreamSource source;
-        auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, bufferBytes,
-                                                              m_cacheRegistry);
+        auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, bufferBytes);
         source.remoteDevice = device.get();
         source.device       = std::move(device);
         source.openTimeout  = std::chrono::milliseconds{8000};
@@ -712,7 +629,6 @@ private:
     std::shared_ptr<NetworkAccessManager> m_network;
     std::shared_ptr<RemoteIoService> m_fallback;
     SettingsManager* m_settings;
-    std::shared_ptr<SubsonicCacheRegistry> m_cacheRegistry;
 };
 
 class SubsonicDecoder : public AudioDecoder
@@ -874,16 +790,15 @@ private:
 } // namespace
 
 void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
-                                    std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
-                                    std::shared_ptr<SubsonicCacheRegistry> cacheRegistry)
+                                    std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings)
 {
     if(!loader || !network) {
         return;
     }
 
     auto fallback = std::make_shared<RemoteIoService>(network, settings);
-    loader->setRemoteSourceProvider(std::make_shared<SubsonicRemoteSourceProvider>(
-        network, std::move(fallback), settings, std::move(cacheRegistry)));
+    loader->setRemoteSourceProvider(
+        std::make_shared<SubsonicRemoteSourceProvider>(network, std::move(fallback), settings));
 
     DecoderCreator ffmpeg;
     for(const auto& entry : loader->decoders()) {

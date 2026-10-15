@@ -38,7 +38,6 @@ class SettingsManager;
 
 namespace Subsonic {
 class SubsonicClient;
-class SubsonicDownloadManager;
 class SubsonicLibraryDownloader;
 
 enum class BrowserAction : uint8_t
@@ -66,8 +65,8 @@ class SubsonicBrowser : public QWidget
 
 public:
     SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                    SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
-                    SettingsManager* settings, QWidget* parent = nullptr);
+                    SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
+                    QWidget* parent = nullptr);
 
     void refresh();
     void openSettings();
@@ -106,15 +105,12 @@ private:
     void addPlaceholder(QTreeWidgetItem* item, const QString& text = {});
     void gatherTracks(const QList<QTreeWidgetItem*>& items, const std::shared_ptr<GatherState>& state);
     void finishGather(const std::shared_ptr<GatherState>& state);
-    void downloadAndPlay(const std::shared_ptr<GatherState>& state);
     void downloadToLibrary(const std::shared_ptr<GatherState>& state);
-    void updateLibraryDownloadStatus();
     void applyAction(const TrackList& tracks, BrowserAction action, bool startPlayback);
     [[nodiscard]] Track trackForSong(const QJsonObject& song, const QString& filepath) const;
-    [[nodiscard]] bool isSongPlayable(const QJsonObject& song) const;
     [[nodiscard]] QString coverCachePath(const QString& coverArtId) const;
-    [[nodiscard]] QString cacheText(const QJsonObject& song) const;
-    void updateDownloadProgress();
+    [[nodiscard]] QString downloadedText(const QJsonObject& song) const;
+    void updateDownloadedColumn();
     void applyCover(QTreeWidgetItem* item, const QString& coverArtId);
     void requestCover(const QString& coverArtId);
     void applyCoverToTree(const QString& coverArtId);
@@ -135,15 +131,10 @@ private:
 
     std::shared_ptr<NetworkAccessManager> m_network;
     PlaylistInteractor* m_interactor;
-    SubsonicDownloadManager* m_downloads;
     SubsonicLibraryDownloader* m_libraryDownloads;
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     QLabel* m_status;
-    QLabel* m_activity;
-    QLabel* m_dots;
-    QTimer* m_dotsTimer{nullptr};
-    int m_dotsCount{0};
     QTreeWidget* m_tree;
     QLineEdit* m_filter{nullptr};
     QToolButton* m_filterOptions{nullptr};

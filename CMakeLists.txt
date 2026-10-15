@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(foosonic VERSION 0.4.0 LANGUAGES CXX)
+project(foosonic VERSION 0.5.0 LANGUAGES CXX)
 
 find_package(Fooyin REQUIRED)
 
@@ -14,8 +14,8 @@ create_fooyin_plugin(
             src/settings/subsonicsettingspage.h
             src/client/subsonicclient.cpp
             src/client/subsonicclient.h
-            src/playback/subsonicdownloadmanager.cpp
-            src/playback/subsonicdownloadmanager.h
+            src/playback/subsonicplaybackcontroller.cpp
+            src/playback/subsonicplaybackcontroller.h
             src/playback/subsonicremoteplayback.cpp
             src/playback/subsonicremoteplayback.h
             src/playback/subsonicstreamutils.h

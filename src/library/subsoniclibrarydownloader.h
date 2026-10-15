@@ -31,8 +31,8 @@ class SubsonicClient;
  * (Artist/Album/NN - Title.ext), writing their tags and embedding the cover art, then
  * asks the music library to scan them so they show up like locally added tracks.
  *
- * This is separate from the playback cache: library files are never evicted and the
- * downloads don't compete with playback prefetch.
+ * Library files are permanent: they are never evicted, and tracks that already exist
+ * here are played (and seeked) from disk instead of streaming.
  */
 class SubsonicLibraryDownloader : public QObject
 {

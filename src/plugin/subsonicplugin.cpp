@@ -8,8 +8,8 @@
 
 #include "subsonicbrowserwidget.h"
 #include "subsonicdialog.h"
-#include "subsonicdownloadmanager.h"
 #include "subsoniclibrarydownloader.h"
+#include "subsonicplaybackcontroller.h"
 #include "subsonicremoteplayback.h"
 #include "subsonicsettings.h"
 #include "subsonicsettingspage.h"
@@ -39,13 +39,10 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
     registerSubsonicSettings(m_settings);
 
     // Subsonic streams are plain http(s), which fooyin hard-codes as non-seekable. Install a seekable
-    // HTTP-Range device and a decoder that keeps using fooyin's FFmpeg backend through it. The device
-    // also consults the shared cache registry so a completed cache download is served from disk.
-    auto cacheRegistry = std::make_shared<SubsonicCacheRegistry>();
-    registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings, cacheRegistry);
+    // HTTP-Range device and a decoder that keeps using fooyin's FFmpeg backend through it.
+    registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings);
 
-    m_downloads = new SubsonicDownloadManager{m_network, m_settings, context.playerController,
-                                              context.playlistHandler, context.audioLoader, cacheRegistry, this};
+    new SubsonicPlaybackController{m_network, m_settings, context.playerController, this};
 
     m_libraryDownloads = new SubsonicLibraryDownloader{m_network, m_settings, context.audioLoader,
                                                        context.library, this};
@@ -63,12 +60,12 @@ void SubsonicPlugin::initialise(const GuiPluginContext& context)
     m_actionManager = context.actionManager;
     m_widgetProvider = context.widgetProvider;
 
-    new SubsonicSettingsPage{m_network, m_settings, m_downloads, this};
+    new SubsonicSettingsPage{m_network, m_settings, this};
 
     m_widgetProvider->registerWidget(
         u"SubsonicBrowser"_s,
         [this]() {
-            return new SubsonicBrowserWidget{m_network, m_interactor, m_downloads, m_libraryDownloads, m_settings};
+            return new SubsonicBrowserWidget{m_network, m_interactor, m_libraryDownloads, m_settings};
         },
         tr("Foosonic Browser"));
     m_widgetProvider->setSubMenus(u"SubsonicBrowser"_s, {tr("Internet")});
@@ -92,7 +89,7 @@ void SubsonicPlugin::showBrowser()
         return;
     }
 
-    m_dialog = new SubsonicDialog{m_network, m_interactor, m_downloads, m_libraryDownloads, m_settings,
+    m_dialog = new SubsonicDialog{m_network, m_interactor, m_libraryDownloads, m_settings,
                                   Utils::getMainWindow()};
     m_dialog->setAttribute(Qt::WA_DeleteOnClose);
     m_dialog->show();

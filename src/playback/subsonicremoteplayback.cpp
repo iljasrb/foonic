@@ -683,7 +683,7 @@ public:
         innerSource.filepath.clear(); // let FFmpeg probe the content, never re-open the URL
 
         Track innerTrack = track;
-        innerTrack.setFilePath(QStringLiteral("/foosonic/subsonic-stream"));
+        innerTrack.setFilePath(QStringLiteral("/foonic/subsonic-stream"));
 
         const auto format = m_inner->init(innerSource, innerTrack, options);
         if(!format) {
@@ -812,10 +812,10 @@ void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
         return;
     }
 
-    loader->addDecoder(u"Foosonic Remote"_s, [ffmpeg] { return std::make_unique<SubsonicDecoder>(ffmpeg); }, 0);
+    loader->addDecoder(u"Foonic Remote"_s, [ffmpeg] { return std::make_unique<SubsonicDecoder>(ffmpeg); }, 0);
 
     // fooyin restores the decoder order from saved settings after plugins initialise, which can
     // shuffle us behind FFmpeg. Put ourselves back in front once the event loop is running.
-    QTimer::singleShot(0, [loader] { loader->changeDecoderIndex(u"Foosonic Remote"_s, 0); });
+    QTimer::singleShot(0, [loader] { loader->changeDecoderIndex(u"Foonic Remote"_s, 0); });
 }
 } // namespace Fooyin::Subsonic

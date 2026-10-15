@@ -27,7 +27,7 @@ SubsonicBrowserWidget::SubsonicBrowserWidget(std::shared_ptr<NetworkAccessManage
 
 QString SubsonicBrowserWidget::name() const
 {
-    return tr("Foosonic Browser");
+    return tr("Foonic Browser");
 }
 
 QString SubsonicBrowserWidget::layoutName() const

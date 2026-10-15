@@ -1,8 +1,8 @@
 {
-    "Name" : "Foosonic",
+    "Name" : "Foonic",
     "Version" : "@PROJECT_VERSION@",
-    "Author" : "foosonic",
+    "Author" : "foonic",
     "Category" : "Online Services",
     "Description" : "Browse and stream music from a Subsonic-compatible server",
-    "Url" : "https://github.com/iljasrb/foosonic"
+    "Url" : "https://github.com/iljasrb/foonic"
 }

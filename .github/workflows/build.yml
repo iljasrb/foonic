@@ -36,7 +36,7 @@ jobs:
           if [ -z "$fooyin_version" ]; then
             fooyin_version="fooyin $(pacman -Q fooyin | awk '{print $2}')"
           fi
-          plugin_version="$(sed -n 's/.*project(foosonic VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)"
+          plugin_version="$(sed -n 's/.*project(foonic VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)"
           echo "fooyin=$fooyin_version" >> "$GITHUB_OUTPUT"
           echo "plugin=$plugin_version" >> "$GITHUB_OUTPUT"
 
@@ -49,8 +49,8 @@ jobs:
       - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
-          name: fyplugin_foosonic
-          path: build/fyplugin_foosonic.so
+          name: fyplugin_foonic
+          path: build/fyplugin_foonic.so
           if-no-files-found: error
 
       - name: Attach to release
@@ -61,4 +61,4 @@ jobs:
           generate_release_notes: true
           body: |
             Built against **${{ steps.versions.outputs.fooyin }}** (plugin version ${{ steps.versions.outputs.plugin }}).
-          files: build/fyplugin_foosonic.so
+          files: build/fyplugin_foonic.so

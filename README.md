@@ -1,4 +1,4 @@
-# foosonic
+# foonic
 
 A [fooyin](https://github.com/fooyin/fooyin) plugin that browses and streams music from a
 Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
@@ -7,7 +7,7 @@ Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 
 | Feature | Status |
 |---|---|
-| Library browser (**View → Foosonic Browser**) and layout widget (Internet category) | Implemented |
+| Library browser (**View → Foonic Browser**) and layout widget (Internet category) | Implemented |
 | Drag-and-drop / menu add to a fooyin playlist, Play Next, Add to Queue | Implemented |
 | Subsonic playlists, and server playlist editing (create / add / rename / delete) | Implemented |
 | Library search and playlist search | Implemented |
@@ -23,17 +23,17 @@ Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 
 ## Install
 
-1. Download `fyplugin_foosonic.so` from the
-[Releases](https://github.com/iljasrb/foosonic/releases) page.
+1. Download `fyplugin_foonic.so` from the
+[Releases](https://github.com/iljasrb/foonic/releases) page.
 2. Install it in fooyin: Settings → Plugins → Install, or drop it
 into fooyin's plugin directory:
 
 ```sh
 mkdir -p ~/.local/lib/fooyin/plugins
-cp fyplugin_foosonic.so ~/.local/lib/fooyin/plugins/
+cp fyplugin_foonic.so ~/.local/lib/fooyin/plugins/
 ```
 
-Restart fooyin, then open **View → Foosonic Browser**.
+Restart fooyin, then open **View → Foonic Browser**.
 
 ## Build from source
 
@@ -44,13 +44,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Then copy `build/fyplugin_foosonic.so` as above, or install system-wide with
+Then copy `build/fyplugin_foonic.so` as above, or install system-wide with
 `sudo cmake --install build`.
 
 ## Usage
 
-- **View → Foosonic Browser** opens it in a window.
-- Or add the **Foosonic Browser** layout widget (under *Internet*) to embed it in a layout.
+- **View → Foonic Browser** opens it in a window.
+- Or add the **Foonic Browser** layout widget (under *Internet*) to embed it in a layout.
 
 The browser has a **Filter** box that searches the server (Subsonic `search3`, falling back to
 `search2`) for matching artists, albums and songs and shows them as grouped results (input is
@@ -69,7 +69,7 @@ skipped. Tracks that already exist in the library are played and seeked from dis
 
 ## Settings
 
-All under **Settings → Foosonic**:
+All under **Settings → Foonic**:
 
 - **Server config** (URL, username, password, authentication mode / API key, SSL, music folder,
   cover-art size). Authentication can be token (default), plaintext password, or an OpenSubsonic

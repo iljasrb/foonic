@@ -67,10 +67,10 @@ void SubsonicPlugin::initialise(const GuiPluginContext& context)
         [this]() {
             return new SubsonicBrowserWidget{m_network, m_interactor, m_libraryDownloads, m_settings};
         },
-        tr("Foosonic Browser"));
+        tr("Foonic Browser"));
     m_widgetProvider->setSubMenus(u"SubsonicBrowser"_s, {tr("Internet")});
 
-    auto* showSubsonic = new QAction{tr("Foosonic &Browser"), this};
+    auto* showSubsonic = new QAction{tr("Foonic &Browser"), this};
     showSubsonic->setStatusTip(tr("Browse music on a Subsonic server"));
 
     auto* command = m_actionManager->registerAction(showSubsonic, "Subsonic.ShowBrowser");

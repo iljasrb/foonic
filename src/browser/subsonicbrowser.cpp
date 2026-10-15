@@ -1343,7 +1343,7 @@ void SubsonicBrowser::deleteSelectedPlaylist(QTreeWidgetItem* item)
     if(id.isEmpty()) {
         return;
     }
-    const auto answer = QMessageBox::question(this, tr("Foosonic"),
+    const auto answer = QMessageBox::question(this, tr("Foonic"),
                                               tr("Delete playlist \"%1\" from the server?").arg(item->text(0)),
                                               QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if(answer != QMessageBox::Yes) {
@@ -1421,7 +1421,7 @@ Track SubsonicBrowser::trackForSong(const QJsonObject& song, const QString& file
 QString SubsonicBrowser::coverCachePath(const QString& coverArtId) const
 {
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-        + QStringLiteral("/foosonic/covers");
+        + QStringLiteral("/foonic/covers");
     QDir{}.mkpath(dir);
     const QByteArray key = QCryptographicHash::hash(coverArtId.toUtf8(), QCryptographicHash::Sha1).toHex();
     return dir + u'/' + QString::fromLatin1(key) + u".jpg"_s;

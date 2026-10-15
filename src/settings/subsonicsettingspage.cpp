@@ -407,8 +407,8 @@ SubsonicSettingsPage::SubsonicSettingsPage(std::shared_ptr<NetworkAccessManager>
     : SettingsPage{settings->settingsDialog(), parent}
 {
     setId(SettingsPageId);
-    setName(tr("Foosonic"));
-    setCategory({tr("Foosonic")});
+    setName(tr("Foonic"));
+    setCategory({tr("Foonic")});
     setPosition(SettingsPagePosition::Last);
     setWidgetCreator([network = std::move(network), settings]() {
         return new SubsonicSettingsPageWidget{network, settings};

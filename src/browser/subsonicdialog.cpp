@@ -21,7 +21,7 @@ SubsonicDialog::SubsonicDialog(std::shared_ptr<NetworkAccessManager> network, Pl
     : QDialog{parent}
     , m_browser{new SubsonicBrowser{std::move(network), interactor, libraryDownloads, settings, this}}
 {
-    setWindowTitle(tr("Foosonic Browser"));
+    setWindowTitle(tr("Foonic Browser"));
 
     auto* layout = new QVBoxLayout{this};
     layout->setContentsMargins(9, 9, 9, 9);

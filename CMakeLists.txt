@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(foosonic VERSION 0.5.0 LANGUAGES CXX)
+project(foonic VERSION 0.5.0 LANGUAGES CXX)
 
 find_package(Fooyin REQUIRED)
 
 create_fooyin_plugin(
-    foosonic
+    foonic
     DEPENDS Fooyin::Core
             Fooyin::Gui
     SOURCES src/core/subsonictrack.h
@@ -33,7 +33,7 @@ create_fooyin_plugin(
 
 # Let every source include its siblings by bare filename (e.g. "subsonicclient.h").
 target_include_directories(
-    foosonic
+    foonic
     PRIVATE src/core
             src/settings
             src/client
@@ -44,11 +44,11 @@ target_include_directories(
 )
 
 # Optional self-check for the pure parsing helpers (off by default).
-option(FOOSONIC_BUILD_TESTS "Build foosonic tests" OFF)
-if(FOOSONIC_BUILD_TESTS)
+option(FOONIC_BUILD_TESTS "Build foonic tests" OFF)
+if(FOONIC_BUILD_TESTS)
     enable_testing()
-    add_executable(foosonic_streamutils_test tests/subsonicstreamutils_test.cpp)
-    target_link_libraries(foosonic_streamutils_test PRIVATE Fooyin::Core)
-    target_include_directories(foosonic_streamutils_test PRIVATE src/playback)
-    add_test(NAME subsonic_streamutils COMMAND foosonic_streamutils_test)
+    add_executable(foonic_streamutils_test tests/subsonicstreamutils_test.cpp)
+    target_link_libraries(foonic_streamutils_test PRIVATE Fooyin::Core)
+    target_include_directories(foonic_streamutils_test PRIVATE src/playback)
+    add_test(NAME subsonic_streamutils COMMAND foonic_streamutils_test)
 endif()

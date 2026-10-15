@@ -7,14 +7,12 @@
 #include "subsonicsettingspage.h"
 
 #include "subsonicclient.h"
-#include "subsonicdownloadmanager.h"
 #include "subsonicsettings.h"
 
 #include <core/network/networkaccessmanager.h>
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -23,7 +21,6 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStringList>
@@ -38,8 +35,7 @@ class SubsonicSettingsPageWidget : public SettingsPageWidget
     Q_OBJECT
 
 public:
-    SubsonicSettingsPageWidget(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
-                               SubsonicDownloadManager* downloads);
+    SubsonicSettingsPageWidget(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings);
 
     void load() override;
     void apply() override;
@@ -49,17 +45,12 @@ private:
     [[nodiscard]] SubsonicSettings uiSettings() const;
     void testConnection();
     void loadMusicFolders();
-    void browseDownloadDir();
     void browseLibraryDir();
-    void clearCache();
     void updateBitRateState();
-    void updateModeState();
-    void updateCacheInfo();
     void setTestStatus(const QString& text, const QString& color = {});
 
     std::shared_ptr<NetworkAccessManager> m_network;
     SettingsManager* m_settings;
-    SubsonicDownloadManager* m_downloads;
 
     QLineEdit* m_server;
     QLineEdit* m_username;
@@ -68,15 +59,9 @@ private:
     QComboBox* m_musicFolder;
     QPushButton* m_refreshFolders;
     QLabel* m_testResult;
-    QComboBox* m_mode;
     QComboBox* m_format;
     QSpinBox* m_maxBitRate;
-    QLineEdit* m_downloadDir;
     QLineEdit* m_libraryDir;
-    QCheckBox* m_streamWhileDownloading;
-    QSpinBox* m_prefetch;
-    QSpinBox* m_cacheLimit;
-    QLabel* m_cacheInfo;
     QSpinBox* m_streamBuffer;
     QSpinBox* m_remotePrebuffer;
     QCheckBox* m_seekFade;
@@ -85,16 +70,13 @@ private:
     QCheckBox* m_scrobble;
     QComboBox* m_authMode;
     QLineEdit* m_apiKey;
-    QCheckBox* m_playOnlyCached;
 };
 } // namespace
 
 SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAccessManager> network,
-                                                       SettingsManager* settings,
-                                                       SubsonicDownloadManager* downloads)
+                                                       SettingsManager* settings)
     : m_network{std::move(network)}
     , m_settings{settings}
-    , m_downloads{downloads}
     , m_server{new QLineEdit{this}}
     , m_username{new QLineEdit{this}}
     , m_password{new QLineEdit{this}}
@@ -102,14 +84,9 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     , m_musicFolder{new QComboBox{this}}
     , m_refreshFolders{new QPushButton{tr("Refresh"), this}}
     , m_testResult{new QLabel{this}}
-    , m_mode{new QComboBox{this}}
     , m_format{new QComboBox{this}}
     , m_maxBitRate{new QSpinBox{this}}
-    , m_downloadDir{new QLineEdit{this}}
     , m_libraryDir{new QLineEdit{this}}
-    , m_streamWhileDownloading{new QCheckBox{tr("Stream while downloading"), this}}
-    , m_prefetch{new QSpinBox{this}}
-    , m_cacheLimit{new QSpinBox{this}}
     , m_streamBuffer{new QSpinBox{this}}
     , m_remotePrebuffer{new QSpinBox{this}}
     , m_seekFade{new QCheckBox{tr("Fade seek"), this}}
@@ -118,7 +95,6 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     , m_scrobble{new QCheckBox{tr("Report now playing and play counts to the server"), this}}
     , m_authMode{new QComboBox{this}}
     , m_apiKey{new QLineEdit{this}}
-    , m_playOnlyCached{new QCheckBox{tr("Play cached/downloaded tracks only (never stream)"), this}}
 {
     m_server->setPlaceholderText(u"https://music.example.com"_s);
     m_password->setEchoMode(QLineEdit::Password);
@@ -155,11 +131,6 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     auto* connectionGroup = new QGroupBox{tr("Connection"), this};
     connectionGroup->setLayout(connectionForm);
 
-    m_mode->addItem(tr("Download first (seekable)"), static_cast<int>(PlaybackMode::DownloadFirst));
-    m_mode->addItem(tr("Stream (play immediately) — testing"), static_cast<int>(PlaybackMode::Stream));
-    m_mode->setToolTip(tr("Download-first saves each track before playing, which enables seeking and avoids "
-                          "servers/proxies that cut long-lived streams. Streaming is experimental."));
-
     m_format->addItem(tr("Original (no transcoding)"), u"raw"_s);
     m_format->addItem(tr("MP3"), u"mp3"_s);
     m_format->addItem(tr("Opus"), u"opus"_s);
@@ -169,15 +140,6 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     m_maxBitRate->setSingleStep(32);
     m_maxBitRate->setSuffix(u" kbps"_s);
     m_maxBitRate->setSpecialValueText(tr("Unlimited"));
-
-    m_streamWhileDownloading->setToolTip(
-        tr("Play right away and switch to the cached file at the same position. Disable to wait for the "
-           "download before playing."));
-
-    m_prefetch->setRange(0, 5);
-    m_prefetch->setSuffix(tr(" tracks"));
-    m_prefetch->setSpecialValueText(tr("None"));
-    m_prefetch->setToolTip(tr("Download this many upcoming tracks ahead of playback."));
 
     m_streamBuffer->setRange(8, 1024);
     m_streamBuffer->setSuffix(u" MB"_s);
@@ -205,44 +167,15 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     updateFadeState();
 
     auto* playbackForm = new QFormLayout;
-    playbackForm->addRow(tr("Playback mode"), m_mode);
-    playbackForm->addRow({}, m_streamWhileDownloading);
-    playbackForm->addRow(tr("Prefetch ahead"), m_prefetch);
     playbackForm->addRow(tr("Stream format"), m_format);
     playbackForm->addRow(tr("Max bitrate"), m_maxBitRate);
     playbackForm->addRow(tr("Stream buffer"), m_streamBuffer);
     playbackForm->addRow(tr("Remote prebuffer"), m_remotePrebuffer);
     playbackForm->addRow(tr("Seek fade"), fadeRow);
     playbackForm->addRow({}, m_scrobble);
-    playbackForm->addRow({}, m_playOnlyCached);
 
     auto* playbackGroup = new QGroupBox{tr("Playback"), this};
     playbackGroup->setLayout(playbackForm);
-
-    auto* browseButton = new QPushButton{tr("Browse..."), this};
-    auto* clearButton  = new QPushButton{tr("Clear Cache"), this};
-
-    auto* dirRow = new QHBoxLayout;
-    dirRow->addWidget(m_downloadDir, 1);
-    dirRow->addWidget(browseButton);
-    dirRow->addWidget(clearButton);
-
-    m_cacheLimit->setRange(0, 102400);
-    m_cacheLimit->setSingleStep(256);
-    m_cacheLimit->setSuffix(u" MB"_s);
-    m_cacheLimit->setSpecialValueText(tr("Unlimited"));
-    m_cacheLimit->setToolTip(tr("Oldest cached files are removed when the cache grows past this size."));
-
-    m_cacheInfo = new QLabel{this};
-    m_cacheInfo->setWordWrap(true);
-
-    auto* cacheForm = new QFormLayout;
-    cacheForm->addRow(tr("Download folder"), dirRow);
-    cacheForm->addRow(tr("Cache size limit"), m_cacheLimit);
-    cacheForm->addRow(tr("Cache"), m_cacheInfo);
-
-    auto* cacheGroup = new QGroupBox{tr("Download Cache"), this};
-    cacheGroup->setLayout(cacheForm);
 
     auto* libraryBrowse = new QPushButton{tr("Browse..."), this};
     auto* libraryRow    = new QHBoxLayout;
@@ -263,17 +196,13 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     auto* layout = new QVBoxLayout{this};
     layout->addWidget(connectionGroup);
     layout->addWidget(playbackGroup);
-    layout->addWidget(cacheGroup);
     layout->addWidget(libraryGroup);
     layout->addStretch();
 
     connect(testButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::testConnection);
     connect(m_refreshFolders, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::loadMusicFolders);
-    connect(browseButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::browseDownloadDir);
     connect(libraryBrowse, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::browseLibraryDir);
-    connect(clearButton, &QPushButton::clicked, this, &SubsonicSettingsPageWidget::clearCache);
     connect(m_format, &QComboBox::currentIndexChanged, this, &SubsonicSettingsPageWidget::updateBitRateState);
-    connect(m_mode, &QComboBox::currentIndexChanged, this, &SubsonicSettingsPageWidget::updateModeState);
     auto updateAuthState = [this] {
         const bool apiKey = m_authMode->currentData().toString() == u"apiKey"_s;
         m_username->setEnabled(!apiKey);
@@ -281,18 +210,8 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
         m_apiKey->setEnabled(apiKey);
     };
     connect(m_authMode, &QComboBox::currentIndexChanged, this, updateAuthState);
-    connect(m_cacheLimit, &QSpinBox::valueChanged, this, &SubsonicSettingsPageWidget::updateCacheInfo);
-
-    if(m_downloads) {
-        connect(m_downloads, &SubsonicDownloadManager::downloadProgressChanged, this,
-                &SubsonicSettingsPageWidget::updateCacheInfo);
-        connect(m_downloads, &SubsonicDownloadManager::cacheStateChanged, this,
-                [this](const QString&) { updateCacheInfo(); });
-    }
 
     updateBitRateState();
-    updateModeState();
-    updateCacheInfo();
     updateAuthState();
 }
 
@@ -318,6 +237,7 @@ void SubsonicSettingsPageWidget::load()
     m_password->setText(settings.password);
     m_ignoreSsl->setChecked(settings.ignoreSslErrors);
     m_apiKey->setText(settings.apiKey);
+
     const int authIndex = m_authMode->findData(settings.authMode);
     m_authMode->setCurrentIndex(authIndex >= 0 ? authIndex : 0);
 
@@ -328,39 +248,26 @@ void SubsonicSettingsPageWidget::load()
         m_musicFolder->setCurrentIndex(1);
     }
 
-    const int modeIndex = m_mode->findData(static_cast<int>(settings.playbackMode));
-    m_mode->setCurrentIndex(modeIndex >= 0 ? modeIndex : 0);
-
     const int formatIndex = m_format->findData(settings.format);
     m_format->setCurrentIndex(formatIndex >= 0 ? formatIndex : 0);
 
     m_maxBitRate->setValue(settings.maxBitRate);
-    m_downloadDir->setText(settings.downloadDir);
     m_libraryDir->setText(settings.libraryDir);
-    m_streamWhileDownloading->setChecked(settings.streamWhileDownloading);
-    m_prefetch->setValue(settings.prefetchCount);
-    m_cacheLimit->setValue(settings.cacheLimitMb);
     m_streamBuffer->setValue(settings.streamBufferMb);
     m_remotePrebuffer->setValue(settings.remotePrebufferMs);
     m_seekFade->setChecked(settings.seekFadeEnabled);
     m_seekFadeMs->setValue(settings.seekFadeMs);
     m_coverArtSize->setValue(settings.coverArtSize);
     m_scrobble->setChecked(settings.scrobblePlays);
-    m_playOnlyCached->setChecked(settings.playOnlyCached);
     setTestStatus({});
     updateBitRateState();
-    updateModeState();
-    updateCacheInfo();
 
     if(settings.isValid()) {
         loadMusicFolders();
     }
 
-    qCInfo(SUBSONIC) << "Loaded settings: mode="
-                     << (settings.playbackMode == PlaybackMode::DownloadFirst ? "download-first" : "stream")
-                     << "format=" << settings.format << "maxBitRate=" << settings.maxBitRate
-                     << "downloadDir=" << settings.downloadDir << "musicFolder=" << settings.musicFolderId
-                     << "ignoreSsl=" << settings.ignoreSslErrors;
+    qCInfo(SUBSONIC) << "Loaded settings: format=" << settings.format << "maxBitRate=" << settings.maxBitRate
+                     << "musicFolder=" << settings.musicFolderId << "ignoreSsl=" << settings.ignoreSslErrors;
 }
 
 void SubsonicSettingsPageWidget::apply()
@@ -371,37 +278,25 @@ void SubsonicSettingsPageWidget::apply()
     settings.password     = m_password->text();
     settings.authMode     = m_authMode->currentData().toString();
     settings.apiKey       = m_apiKey->text().trimmed();
-    settings.playbackMode = static_cast<PlaybackMode>(m_mode->currentData().toInt());
     settings.format       = m_format->currentData().toString();
     settings.maxBitRate   = (settings.format == "raw"_L1) ? 0 : m_maxBitRate->value();
-    settings.downloadDir  = m_downloadDir->text().trimmed();
     settings.libraryDir   = m_libraryDir->text().trimmed();
-    settings.streamWhileDownloading = m_streamWhileDownloading->isChecked();
-    settings.prefetchCount          = m_prefetch->value();
-    settings.cacheLimitMb           = m_cacheLimit->value();
     settings.streamBufferMb         = m_streamBuffer->value();
     settings.remotePrebufferMs      = m_remotePrebuffer->value();
     settings.seekFadeEnabled        = m_seekFade->isChecked();
     settings.seekFadeMs             = m_seekFadeMs->value();
     settings.coverArtSize           = m_coverArtSize->value();
     settings.scrobblePlays          = m_scrobble->isChecked();
-    settings.playOnlyCached         = m_playOnlyCached->isChecked();
     m_settings->set(QStringLiteral("Engine/RemotePrebufferMs"), settings.remotePrebufferMs);
     settings.ignoreSslErrors        = m_ignoreSsl->isChecked();
     settings.musicFolderId          = m_musicFolder->currentData().toString();
 
     saveSubsonicSettings(m_settings, settings);
-    if(m_downloads) {
-        m_downloads->applyPlaybackMode();
-    }
     // Persist immediately so the choice survives an unclean exit (the core only flushes every 5 minutes).
     m_settings->storeSettings();
 
-    qCInfo(SUBSONIC) << "Applied settings: mode="
-                     << (settings.playbackMode == PlaybackMode::DownloadFirst ? "download-first" : "stream")
-                     << "format=" << settings.format << "maxBitRate=" << settings.maxBitRate
-                     << "downloadDir=" << settings.downloadDir << "musicFolder=" << settings.musicFolderId
-                     << "ignoreSsl=" << settings.ignoreSslErrors;
+    qCInfo(SUBSONIC) << "Applied settings: format=" << settings.format << "maxBitRate=" << settings.maxBitRate
+                     << "musicFolder=" << settings.musicFolderId << "ignoreSsl=" << settings.ignoreSslErrors;
 }
 
 void SubsonicSettingsPageWidget::reset()
@@ -414,24 +309,17 @@ void SubsonicSettingsPageWidget::reset()
     m_ignoreSsl->setChecked(false);
     m_musicFolder->clear();
     m_musicFolder->addItem(tr("All folders"), QString{});
-    m_mode->setCurrentIndex(0);
     m_format->setCurrentIndex(0);
     m_maxBitRate->setValue(0);
-    m_downloadDir->setText(defaultDownloadDir());
     m_libraryDir->setText(defaultLibraryDir());
-    m_streamWhileDownloading->setChecked(true);
-    m_prefetch->setValue(1);
-    m_cacheLimit->setValue(0);
     m_streamBuffer->setValue(64);
     m_remotePrebuffer->setValue(400);
     m_seekFade->setChecked(true);
     m_seekFadeMs->setValue(200);
     m_coverArtSize->setValue(300);
     m_scrobble->setChecked(true);
-    m_playOnlyCached->setChecked(false);
     setTestStatus({});
     updateBitRateState();
-    updateModeState();
 }
 
 void SubsonicSettingsPageWidget::setTestStatus(const QString& text, const QString& color)
@@ -501,14 +389,6 @@ void SubsonicSettingsPageWidget::loadMusicFolders()
     });
 }
 
-void SubsonicSettingsPageWidget::browseDownloadDir()
-{
-    const QString dir = QFileDialog::getExistingDirectory(this, tr("Download folder"), m_downloadDir->text());
-    if(!dir.isEmpty()) {
-        m_downloadDir->setText(dir);
-    }
-}
-
 void SubsonicSettingsPageWidget::browseLibraryDir()
 {
     const QString dir = QFileDialog::getExistingDirectory(this, tr("Library folder"), m_libraryDir->text());
@@ -517,77 +397,21 @@ void SubsonicSettingsPageWidget::browseLibraryDir()
     }
 }
 
-void SubsonicSettingsPageWidget::clearCache()
-{
-    const auto answer = QMessageBox::question(this, tr("Foosonic"), tr("Delete all cached Subsonic downloads?"),
-                                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if(answer != QMessageBox::Yes) {
-        return;
-    }
-
-    if(m_downloads) {
-        m_downloads->clearCache();
-    }
-    else {
-        const QString dir = m_downloadDir->text().trimmed();
-        if(!dir.isEmpty()) {
-            QDir{dir}.removeRecursively();
-        }
-    }
-    updateCacheInfo();
-}
-
 void SubsonicSettingsPageWidget::updateBitRateState()
 {
     m_maxBitRate->setEnabled(m_format->currentData().toString() != "raw"_L1);
 }
 
-void SubsonicSettingsPageWidget::updateModeState()
-{
-    m_streamWhileDownloading->setEnabled(
-        static_cast<PlaybackMode>(m_mode->currentData().toInt()) == PlaybackMode::DownloadFirst);
-}
-
-void SubsonicSettingsPageWidget::updateCacheInfo()
-{
-    if(!m_cacheInfo) {
-        return;
-    }
-
-    if(!m_downloads) {
-        m_cacheInfo->setText(tr("Not available"));
-        return;
-    }
-
-    const qint64 bytes = m_downloads->cacheSizeBytes();
-    const QString size = bytes > 0 ? formatBytes(bytes) : u"0 B"_s;
-    QString info       = tr("%1 file(s), %2").arg(m_downloads->cachedCount()).arg(size);
-
-    const int limitMb = m_cacheLimit->value();
-    if(limitMb > 0) {
-        const qint64 limit = static_cast<qint64>(limitMb) * 1024 * 1024;
-        const int percent  = static_cast<int>(bytes * 100 / limit);
-        info += tr(" of %1 MB (%2%)").arg(limitMb).arg(percent);
-    }
-
-    const QString active = m_downloads->activeDownloadName();
-    if(!active.isEmpty()) {
-        info += u"\n"_s + tr("Downloading: %1 (%2%)").arg(active).arg(m_downloads->activeDownloadProgress());
-    }
-
-    m_cacheInfo->setText(info);
-}
-
 SubsonicSettingsPage::SubsonicSettingsPage(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
-                                           SubsonicDownloadManager* downloads, QObject* parent)
+                                           QObject* parent)
     : SettingsPage{settings->settingsDialog(), parent}
 {
     setId(SettingsPageId);
     setName(tr("Foosonic"));
     setCategory({tr("Foosonic")});
     setPosition(SettingsPagePosition::Last);
-    setWidgetCreator([network = std::move(network), settings, downloads]() {
-        return new SubsonicSettingsPageWidget{network, settings, downloads};
+    setWidgetCreator([network = std::move(network), settings]() {
+        return new SubsonicSettingsPageWidget{network, settings};
     });
 
     qCInfo(SUBSONIC) << "Registered Subsonic settings page";

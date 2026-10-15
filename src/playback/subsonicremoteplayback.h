@@ -14,8 +14,6 @@ class NetworkAccessManager;
 class SettingsManager;
 
 namespace Subsonic {
-class SubsonicCacheRegistry;
-
 /*!
  * Makes Subsonic HTTP streams seekable/pausable.
  *
@@ -25,7 +23,6 @@ class SubsonicCacheRegistry;
  * non-remote track copy so the "remote => not seekable" rule is not applied.
  */
 void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
-                                    std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
-                                    std::shared_ptr<SubsonicCacheRegistry> cacheRegistry);
+                                    std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings);
 } // namespace Subsonic
 } // namespace Fooyin

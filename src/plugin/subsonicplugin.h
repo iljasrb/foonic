@@ -21,7 +21,6 @@ class WidgetProvider;
 
 namespace Subsonic {
 class SubsonicDialog;
-class SubsonicDownloadManager;
 class SubsonicLibraryDownloader;
 
 class SubsonicPlugin : public QObject,
@@ -45,7 +44,6 @@ private:
     PlaylistInteractor* m_interactor{nullptr};
     ActionManager* m_actionManager{nullptr};
     WidgetProvider* m_widgetProvider{nullptr};
-    SubsonicDownloadManager* m_downloads{nullptr};
     SubsonicLibraryDownloader* m_libraryDownloads{nullptr};
     QPointer<SubsonicDialog> m_dialog;
 };

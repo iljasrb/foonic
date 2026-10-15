@@ -7,7 +7,6 @@
 #include "subsonicbrowser.h"
 
 #include "subsonicclient.h"
-#include "subsonicdownloadmanager.h"
 #include "subsoniclibrarydownloader.h"
 #include "subsonicsettings.h"
 #include "subsonictrack.h"
@@ -324,18 +323,15 @@ private:
 
 namespace Fooyin::Subsonic {
 SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                                 SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
-                                 SettingsManager* settings, QWidget* parent)
+                                 SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
+                                 QWidget* parent)
     : QWidget{parent}
     , m_network{std::move(network)}
     , m_interactor{interactor}
-    , m_downloads{downloads}
     , m_libraryDownloads{libraryDownloads}
     , m_settings{settings}
     , m_client{new SubsonicClient{m_network, loadSubsonicSettings(settings), this}}
     , m_status{new QLabel{this}}
-    , m_activity{new QLabel{this}}
-    , m_dots{new QLabel{this}}
     , m_tree{new SubsonicTreeWidget{this}}
 {
     auto* tree = static_cast<SubsonicTreeWidget*>(m_tree);
@@ -360,12 +356,8 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
                 });
         connect(m_libraryDownloads, &SubsonicLibraryDownloader::warning, this,
                 [this](const QString& message) { setStatus(message); });
-        if(m_downloads) {
-            connect(m_libraryDownloads, &SubsonicLibraryDownloader::downloaded, m_downloads,
-                    [this](const QString& songId, const QJsonObject& song, const QString& path) {
-                        m_downloads->addDownloadedCopy(songId, song, path);
-                    });
-        }
+        connect(m_libraryDownloads, &SubsonicLibraryDownloader::downloaded, this,
+                [this](const QString&, const QJsonObject&, const QString&) { updateDownloadedColumn(); });
     }
 
     auto* refreshButton = new QPushButton{tr("Refresh"), this};
@@ -427,23 +419,7 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     toolbar->addWidget(m_filterOptions);
     toolbar->addWidget(m_filter);
 
-    // Second info row: what the player/cache is doing right now, with an animated busy indicator.
-    m_activity->setTextFormat(Qt::PlainText);
-    m_activity->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_activity->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_activity->setStyleSheet(u"color: palette(mid);"_s);
-    m_activity->setText(tr("Idle."));
-
-    m_dots->setFixedWidth(m_dots->fontMetrics().horizontalAdvance(u"..."_s));
-    m_dots->setStyleSheet(u"color: palette(mid);"_s);
-    m_dotsTimer = new QTimer{this};
-    m_dotsTimer->setInterval(300);
-    connect(m_dotsTimer, &QTimer::timeout, this, [this] {
-        m_dotsCount = (m_dotsCount % 3) + 1;
-        m_dots->setText(QString(m_dotsCount, u'.'));
-    });
-
-    m_tree->setHeaderLabels({tr("Name"), tr("Artist"), tr("Album"), tr("Length"), tr("Size"), tr("Cache")});
+    m_tree->setHeaderLabels({tr("Name"), tr("Artist"), tr("Album"), tr("Length"), tr("Size"), tr("Downloaded")});
     m_tree->setUniformRowHeights(true);
     m_tree->setIconSize(QSize{24, 24});
     m_tree->setAlternatingRowColors(true);
@@ -456,16 +432,9 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     m_tree->setDefaultDropAction(Qt::CopyAction);
     m_tree->setToolTip(tr("Drag artists, albums or songs onto a playlist."));
 
-    auto* activityRow = new QHBoxLayout;
-    activityRow->setContentsMargins(10, 0, 10, 6);
-    activityRow->setSpacing(4);
-    activityRow->addWidget(m_dots);
-    activityRow->addWidget(m_activity, 1);
-
     auto* layout = new QVBoxLayout{this};
     layout->setContentsMargins({});
     layout->addLayout(toolbar);
-    layout->addLayout(activityRow);
     layout->addWidget(m_tree, 1);
 
     connect(refreshButton, &QPushButton::clicked, this, &SubsonicBrowser::refresh);
@@ -499,26 +468,6 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &SubsonicBrowser::showContextMenu);
     m_tree->header()->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree->header(), &QWidget::customContextMenuRequested, this, &SubsonicBrowser::showHeaderMenu);
-
-    if(m_downloads) {
-        connect(m_downloads, &SubsonicDownloadManager::downloadProgressChanged, this,
-                &SubsonicBrowser::updateDownloadProgress);
-        connect(m_downloads, &SubsonicDownloadManager::activityChanged, this,
-                [this](const QString& text, bool busy) {
-                    m_activity->setText(text);
-                    if(busy) {
-                        if(!m_dotsTimer->isActive()) {
-                            m_dotsCount = 1;
-                            m_dots->setText(u"."_s);
-                            m_dotsTimer->start();
-                        }
-                    }
-                    else {
-                        m_dotsTimer->stop();
-                        m_dots->clear();
-                    }
-                });
-    }
 
     // Refresh once the (modeless) settings dialog is closed so config changes take effect.
     if(auto* controller = m_settings->settingsDialog()) {
@@ -835,50 +784,18 @@ TrackList SubsonicBrowser::tracksForDrag(const QList<QTreeWidgetItem*>& items)
     };
     collect(items);
 
-    if(settings.playOnlyCached && m_downloads) {
-        QList<QJsonObject> playable;
-        for(const QJsonObject& song : songs) {
-            if(isSongPlayable(song)) {
-                playable.push_back(song);
-            }
-        }
-        songs = playable;
-    }
-
     if(songs.empty()) {
         return {};
-    }
-
-    if(settings.playbackMode == PlaybackMode::DownloadFirst && m_downloads) {
-        QStringList urls;
-        urls.reserve(songs.size());
-        for(const QJsonObject& song : songs) {
-            urls.push_back(m_client->streamUrl(song.value(u"id"_s).toString()).toString());
-        }
-
-        const QStringList paths = m_downloads->registerSongs(songs, urls, settings.downloadDir);
-
-        TrackList tracks;
-        tracks.reserve(songs.size());
-        for(int i{0}; i < songs.size(); ++i) {
-            const QString songId = songs.at(i).value(u"id"_s).toString();
-            const bool cached
-                = m_downloads->cacheStateForSong(songId) == SubsonicDownloadManager::CacheState::Cached;
-            tracks.push_back(trackForSong(songs.at(i), cached ? paths.at(i) : urls.at(i)));
-        }
-
-        qCInfo(SUBSONIC) << "Dragging" << tracks.size() << "track(s) (download-first)";
-        return tracks;
     }
 
     TrackList tracks;
     tracks.reserve(songs.size());
     for(const QJsonObject& song : songs) {
         const QString songId = song.value(u"id"_s).toString();
-        const QString local  = m_downloads ? m_downloads->downloadedCopyPath(songId) : QString{};
+        const QString local  = m_libraryDownloads ? m_libraryDownloads->existingLocalPath(song) : QString{};
         tracks.push_back(trackForSong(song, local.isEmpty() ? m_client->streamUrl(songId).toString() : local));
     }
-    qCInfo(SUBSONIC) << "Dragging" << tracks.size() << "track(s) (stream)";
+    qCInfo(SUBSONIC) << "Dragging" << tracks.size() << "track(s)";
     return tracks;
 }
 
@@ -1047,15 +964,7 @@ QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const 
     child->setData(0, CoverRole, song.value(u"coverArt"_s).toString());
     applyCover(child, song.value(u"coverArt"_s).toString());
 
-    const QString songId = song.value(u"id"_s).toString();
-    // A permanent library copy from an earlier session is the cache; register it (quietly) so the row
-    // shows it and playback uses the local file.
-    if(m_libraryDownloads && m_downloads) {
-        if(const QString local = m_libraryDownloads->existingLocalPath(song); !local.isEmpty()) {
-            m_downloads->addDownloadedCopy(songId, song, local, false);
-        }
-    }
-    child->setText(5, cacheText(song));
+    child->setText(5, downloadedText(song));
     return child;
 }
 
@@ -1130,41 +1039,16 @@ void SubsonicBrowser::finishGather(const std::shared_ptr<GatherState>& state)
         return;
     }
 
-    if(loadSubsonicSettings(m_settings).playOnlyCached) {
-        QList<QJsonObject> playable;
-        for(const QJsonObject& song : state->songs) {
-            if(isSongPlayable(song)) {
-                playable.push_back(song);
-            }
-        }
-        if(playable.size() != state->songs.size()) {
-            qCInfo(SUBSONIC) << "Play-cached-only: skipped" << (state->songs.size() - playable.size())
-                             << "stream(s)";
-        }
-        state->songs = playable;
-        if(state->songs.empty()) {
-            setStatus(tr("Nothing cached to play (play-cached-only is on)."));
-            return;
-        }
-    }
-
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     m_client->setSettings(settings);
 
-    qCInfo(SUBSONIC) << "Adding" << state->songs.size() << "track(s), total" << formatBytes(state->bytes)
-                     << "mode="
-                     << (settings.playbackMode == PlaybackMode::DownloadFirst ? "download-first" : "stream");
-
-    if(settings.playbackMode == PlaybackMode::DownloadFirst) {
-        downloadAndPlay(state);
-        return;
-    }
+    qCInfo(SUBSONIC) << "Adding" << state->songs.size() << "track(s), total" << formatBytes(state->bytes);
 
     TrackList tracks;
     tracks.reserve(state->songs.size());
     for(const QJsonObject& song : state->songs) {
         const QString songId = song.value(u"id"_s).toString();
-        const QString local  = m_downloads ? m_downloads->downloadedCopyPath(songId) : QString{};
+        const QString local  = m_libraryDownloads ? m_libraryDownloads->existingLocalPath(song) : QString{};
         tracks.push_back(trackForSong(song, local.isEmpty() ? m_client->streamUrl(songId).toString() : local));
     }
     applyAction(tracks, state->action, true);
@@ -1180,48 +1064,6 @@ void SubsonicBrowser::downloadToLibrary(const std::shared_ptr<GatherState>& stat
     qCInfo(SUBSONIC) << "Queuing" << state->songs.size() << "track(s) for library download";
     m_libraryDownloads->enqueue(state->songs);
     setStatus(tr("Queued %1 track(s) for download.").arg(state->songs.size()));
-}
-
-void SubsonicBrowser::downloadAndPlay(const std::shared_ptr<GatherState>& state)
-{
-    if(!m_downloads) {
-        qCWarning(SUBSONIC) << "No download manager available; using streaming only";
-        TrackList tracks;
-        tracks.reserve(state->songs.size());
-        for(const QJsonObject& song : state->songs) {
-            tracks.push_back(trackForSong(song, m_client->streamUrl(song.value(u"id"_s).toString()).toString()));
-        }
-        applyAction(tracks, state->action, true);
-        return;
-    }
-
-    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
-    m_client->setSettings(settings);
-
-    // Use a unique remote stream URL per song; the same URL is registered so the download manager
-    // can promote the playlist entry to the cached file once it has been fetched.
-    QStringList urls;
-    urls.reserve(state->songs.size());
-    for(const QJsonObject& song : state->songs) {
-        urls.push_back(m_client->streamUrl(song.value(u"id"_s).toString()).toString());
-    }
-
-    const QStringList paths = m_downloads->registerSongs(state->songs, urls, settings.downloadDir);
-
-    qCInfo(SUBSONIC) << "download-first:" << state->songs.size() << "track(s), already cached="
-                     << m_downloads->cachedCount();
-
-    // Entries already cached play (and seek) as local files; the rest stream immediately and are
-    // swapped to the cache in place once downloaded.
-    TrackList tracks;
-    tracks.reserve(state->songs.size());
-    for(int i{0}; i < state->songs.size(); ++i) {
-        const QString songId = state->songs.at(i).value(u"id"_s).toString();
-        const bool cached    = m_downloads->cacheStateForSong(songId) == SubsonicDownloadManager::CacheState::Cached;
-        tracks.push_back(trackForSong(state->songs.at(i), cached ? paths.at(i) : urls.at(i)));
-    }
-
-    applyAction(tracks, state->action, true);
 }
 
 void SubsonicBrowser::applyAction(const TrackList& tracks, BrowserAction action, bool startPlayback)
@@ -1573,15 +1415,6 @@ Track SubsonicBrowser::trackForSong(const QJsonObject& song, const QString& file
     return trackFromSong(song, filepath, coverUrl);
 }
 
-bool SubsonicBrowser::isSongPlayable(const QJsonObject& song) const
-{
-    if(!loadSubsonicSettings(m_settings).playOnlyCached || !m_downloads) {
-        return true;
-    }
-    const QString id = song.value(u"id"_s).toString();
-    return !m_downloads->downloadedCopyPath(id).isEmpty() || !m_downloads->localPathForSong(song).isEmpty();
-}
-
 QString SubsonicBrowser::coverCachePath(const QString& coverArtId) const
 {
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
@@ -1591,41 +1424,21 @@ QString SubsonicBrowser::coverCachePath(const QString& coverArtId) const
     return dir + u'/' + QString::fromLatin1(key) + u".jpg"_s;
 }
 
-QString SubsonicBrowser::cacheText(const QJsonObject& song) const
+QString SubsonicBrowser::downloadedText(const QJsonObject& song) const
 {
-    if(!m_downloads) {
-        return {};
-    }
-
-    const QString songId = song.value(u"id"_s).toString();
-    if(m_downloads->isDownloadedCopy(songId)) {
-        return u"\u2713 Downloaded copy"_s;
-    }
-
-    switch(m_downloads->cacheStateForSong(songId)) {
-        case SubsonicDownloadManager::CacheState::Cached:
-            return u"\u2713"_s;
-        case SubsonicDownloadManager::CacheState::Downloading: {
-            const int progress = m_downloads->downloadProgressForSong(songId);
-            return progress > 0 ? u"\u2193 %1%"_s.arg(progress) : u"\u2193"_s;
-        }
-        case SubsonicDownloadManager::CacheState::NotCached:
-            break;
-    }
-
-    // Not registered this session (e.g. a fresh browser load after restart); check the disk directly.
-    return m_downloads->localPathForSong(song).isEmpty() ? QString{} : u"\u2713"_s;
+    return m_libraryDownloads && !m_libraryDownloads->existingLocalPath(song).isEmpty()
+        ? u"\u2713 Downloaded"_s
+        : QString{};
 }
 
-void SubsonicBrowser::updateDownloadProgress()
+void SubsonicBrowser::updateDownloadedColumn()
 {
-    // ponytail: linear scan on every progress tick; switch to tracking just the active row if the tree
-    // ever holds thousands of songs.
+    // ponytail: linear scan on every finished download; track just that row if the tree grows huge.
     QTreeWidgetItemIterator it{m_tree};
     while(*it) {
         QTreeWidgetItem* item = *it;
         if(item->data(0, KindRole).toInt() == Song) {
-            const QString text = cacheText(item->data(0, JsonRole).toJsonObject());
+            const QString text = downloadedText(item->data(0, JsonRole).toJsonObject());
             if(item->text(5) != text) {
                 item->setText(5, text);
             }

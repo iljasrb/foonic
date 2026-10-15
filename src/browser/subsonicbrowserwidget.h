@@ -17,7 +17,6 @@ class SettingsManager;
 
 namespace Subsonic {
 class SubsonicBrowser;
-class SubsonicDownloadManager;
 class SubsonicLibraryDownloader;
 
 /*!
@@ -29,8 +28,8 @@ class SubsonicBrowserWidget : public FyWidget
 
 public:
     SubsonicBrowserWidget(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
-                          SubsonicDownloadManager* downloads, SubsonicLibraryDownloader* libraryDownloads,
-                          SettingsManager* settings, QWidget* parent = nullptr);
+                          SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
+                          QWidget* parent = nullptr);
 
     [[nodiscard]] QString name() const override;
     [[nodiscard]] QString layoutName() const override;

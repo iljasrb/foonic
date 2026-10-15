@@ -7,14 +7,9 @@
 #pragma once
 
 #include <QByteArray>
-#include <QHash>
-#include <QJsonObject>
-#include <QRegularExpression>
 #include <QString>
 #include <QUrl>
 #include <QUrlQuery>
-
-#include <mutex>
 
 namespace Fooyin::Subsonic {
 //! True for a http(s) URL pointing at the Subsonic `stream` endpoint with an id.
@@ -64,38 +59,6 @@ inline ContentRange parseContentRange(const QByteArray& header)
     return range;
 }
 
-//! Extracts the Subsonic song id from a cache filename like `Artist - Title [tr-4802].flac`.
-inline QString songIdFromCachePath(const QString& path)
-{
-    static const QRegularExpression CacheId{QStringLiteral(R"(\[([^\[\]]+)\]\.[^./\\]+$)")};
-    const QRegularExpressionMatch match = CacheId.match(path);
-    return match.hasMatch() ? match.captured(1) : QString{};
-}
-
-//! Builds the cache file name (`Artist - Title [id].suffix`) for a Subsonic song object.
-inline QString subsonicCacheFileName(const QJsonObject& song)
-{
-    const QString id = song.value(QStringLiteral("id")).toString();
-
-    QString name = song.value(QStringLiteral("artist")).toString() + QStringLiteral(" - ")
-        + song.value(QStringLiteral("title")).toString();
-    name = name.trimmed();
-    if(name.isEmpty()) {
-        name = id;
-    }
-
-    static const QRegularExpression Invalid{QStringLiteral(R"([\\/:*?"<>|\x00-\x1f])")};
-    name.replace(Invalid, QStringLiteral("_"));
-    name = name.left(180);
-
-    QString suffix = song.value(QStringLiteral("suffix")).toString();
-    if(suffix.isEmpty()) {
-        suffix = QStringLiteral("bin");
-    }
-
-    return name + QStringLiteral(" [") + id + QStringLiteral("].") + suffix;
-}
-
 //! Returns the image mime type for @p data, or an empty string if it isn't an image. Some servers
 //! answer a cover request with an error envelope (JSON/HTML); embedding that as "art" corrupts files.
 inline QString imageMimeType(const QByteArray& data, const QString& reported)
@@ -117,32 +80,4 @@ inline QString imageMimeType(const QByteArray& data, const QString& reported)
     }
     return {};
 }
-
-//! Thread-safe map from Subsonic song id to a completed cache file path. The download manager
-//! publishes entries here; the stream device consults it so a cached track can be served from disk.
-class SubsonicCacheRegistry
-{
-public:
-    void set(const QString& songId, const QString& path)
-    {
-        const std::scoped_lock lock{m_mutex};
-        m_paths.insert(songId, path);
-    }
-
-    void remove(const QString& songId)
-    {
-        const std::scoped_lock lock{m_mutex};
-        m_paths.remove(songId);
-    }
-
-    [[nodiscard]] QString pathFor(const QString& songId) const
-    {
-        const std::scoped_lock lock{m_mutex};
-        return m_paths.value(songId);
-    }
-
-private:
-    mutable std::mutex m_mutex;
-    QHash<QString, QString> m_paths;
-};
 } // namespace Fooyin::Subsonic

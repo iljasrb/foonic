@@ -22,18 +22,10 @@ Legend: ✅ confirmed working, ⬜ not verified yet.
 | Remote streams are seekable + pausable (HTTP Range) | ✅ |
 | Seeking and pausing on remote streams (server must support HTTP Range) | ✅ |
 | Seek fade (fade out/in) around remote seeks | ✅ |
-| Instant seek from the cached file once a track has downloaded | ✅ |
-| Stream while caching, then play from the local file on pause | ✅ |
-| Prefetch ahead | ✅ |
-| Download resume (HTTP Range) + retry | ✅ |
-| Cache management — size limit + eviction, clear cache, cache info | ✅ |
-| Restored-playlist self-heal (re-stream + re-cache a dead cache path) | ✅ |
 | Transcoding (stream format + max bitrate) | ✅ |
-| Download folder + cache-size-limit settings | ✅ |
+| Download to Library (tagged files added to the fooyin library) | ✅ |
 | Scrobbling (now playing + play counts) | ✅ |
 | Star / unstar, random + starred discovery | ✅ |
-| Browser activity line (streaming, caching, switching, added to cache) | ✅ |
-| "Stream while downloading" gate (hold playback until the track is cached) | ⬜ |
 
 ## Install
 
@@ -79,8 +71,7 @@ right-click a playlist to rename or delete it. **Refresh** reloads the list.
 **Download to Library** works on any selection (a song, album, artist, playlist or several of them),
 saves each track into the library folder below, writes its tags and cover art, and adds it to the
 fooyin library. Files are laid out as `AlbumArtist/Album/NN - Title.ext` and already-present files are
-skipped. Downloaded (and pre-existing library) tracks are also used as the play cache, so they play
-and seek from disk instead of streaming.
+skipped. Tracks that already exist in the library are played and seeked from disk.
 
 ## Settings
 
@@ -89,33 +80,19 @@ All under **Settings → Foosonic**:
 - **Server config** (URL, username, password, authentication mode / API key, SSL, music folder,
   cover-art size). Authentication can be token (default), plaintext password, or an OpenSubsonic
   API key.
-- **Playback mode** — *Download first* (default: stream immediately and cache in the background) or
-  *Stream* (play remotely, caching disabled). Once downloaded, seeks read straight from the cached
-  file and pause switches playback to it (never a mid-track swap).
-- **Stream while downloading** — play at once and switch to the cached file at the same position;
-  off = wait until the track has downloaded.
-- **Prefetch ahead** — how many upcoming tracks to fetch (default 1).
 - **Stream format** (Original / MP3 / Opus / AAC) and **Max bitrate**.
 - **Stream buffer** — in-memory buffer per remote stream (default 64 MB). At least the track size
   keeps the whole track in memory, which makes seeks instant.
 - **Remote prebuffer** — audio buffered before playback resumes after a remote seek (default 400 ms).
 - **Seek fade** — fade out/in around remote seeks, and the fade length (default 200 ms).
 - **Scrobbling** — report now playing and play counts back to the server.
-- **Play cached only** — skip stream-only tracks and play cached/downloaded copies only.
-- **Download folder**, **Cache size limit**, and **Clear Cache**.
 - **Library folder** — where **Download to Library** saves tracks (default `~/Music/Subsonic`). Point
   it at a folder inside one of your fooyin library paths so downloads become library tracks.
 
-The browser's **Cache** column shows ✓ cached / ✓ **Downloaded copy** (a permanent library file) /
-↓ downloading with a percentage. A second status line under the toolbar narrates what the player
-is doing (streaming, caching, switching to the cached file, added to cache), with an animated dots
-indicator while work is in progress. The settings page shows the cache size, file count, and the
-active download.
+The browser's **Downloaded** column marks songs that already exist as a tagged file in the library
+folder.
 
 ## Notes
 
-- A finished background download does not interrupt playback. The track keeps streaming; a seek to
-  already-downloaded audio is served straight from the cached file (no network round-trip), and the
-  local copy is used from the next track start or when you pause.
 - The password (or API key) is stored in fooyin's settings file in plain text.
 - Logs use the `fy.subsonic` category (`QT_LOGGING_RULES="fy.subsonic.debug=true"`).

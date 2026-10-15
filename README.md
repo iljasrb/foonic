@@ -3,34 +3,28 @@
 A [fooyin](https://github.com/fooyin/fooyin) plugin that browses and streams music from a
 Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 
-## Development goal
-
-I am pushing a bunch of new untested features for now, and when the full functionality is achieved I will begin extensive testing and cleanup of the code. Stable version will be published afterwards.
-
 ## Features
-
-Legend: ✅ confirmed working, ⬜ not verified yet.
 
 | Feature | Status |
 |---|---|
-| Library browser (**View → Foosonic Browser**) and layout widget (Internet category) | ✅ |
-| Drag-and-drop / menu add to a fooyin playlist, Play Next, Add to Queue | ✅ |
-| Subsonic playlists, and server playlist editing (create / add / rename / delete) | ✅ |
-| Library search and playlist search | ✅ |
-| Server setup; settings persist across restarts | ✅ |
-| Track metadata + cover art in the browser | ✅ |
-| Remote streams are seekable + pausable (HTTP Range) | ✅ |
-| Seeking and pausing on remote streams (server must support HTTP Range) | ✅ |
-| Seek fade (fade out/in) around remote seeks | ✅ |
-| Transcoding (stream format + max bitrate) | ✅ |
-| Download to Library (tagged files added to the fooyin library) | ✅ |
-| Scrobbling (now playing + play counts) | ✅ |
-| Star / unstar, random + starred discovery | ✅ |
+| Library browser (**View → Foosonic Browser**) and layout widget (Internet category) | Implemented |
+| Drag-and-drop / menu add to a fooyin playlist, Play Next, Add to Queue | Implemented |
+| Subsonic playlists, and server playlist editing (create / add / rename / delete) | Implemented |
+| Library search and playlist search | Implemented |
+| Server setup; settings persist across restarts | Implemented |
+| Track metadata + cover art in the browser | Implemented |
+| Remote streams are seekable + pausable (HTTP Range) | Implemented |
+| Seeking and pausing on remote streams (server must support HTTP Range) | Implemented |
+| Seek fade (fade out/in) around remote seeks | Implemented |
+| Transcoding (stream format + max bitrate) | Unverified |
+| Download to Library (tagged files added to the fooyin library) | Implemented |
+| Scrobbling (now playing + play counts) | Implemented |
+| Star / unstar, random + starred discovery | Unverified |
 
 ## Install
 
 1. Download `fyplugin_foosonic.so` from the
-[Releases](https://github.com/iljasrb/foosonic/releases) page (pre-release builds).
+[Releases](https://github.com/iljasrb/foosonic/releases) page.
 2. Install it in fooyin: Settings → Plugins → Install, or drop it
 into fooyin's plugin directory:
 

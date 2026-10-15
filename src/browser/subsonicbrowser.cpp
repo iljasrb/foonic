@@ -694,8 +694,11 @@ bool SubsonicBrowser::ensureDragData(const QList<QTreeWidgetItem*>& items)
     }
     for(const QString& id : artistIds) {
         ++*remaining;
-        m_client->getArtist(id, [this, finish, remaining](const QJsonObject& object, const QString& error) {
+        m_client->getArtist(id, [this, id, finish, remaining](const QJsonObject& object, const QString& error) {
             const QJsonArray albums = error.isEmpty() ? asArray(object.value(u"album"_s)) : QJsonArray{};
+            // tracksForDrag builds an artist from this cache, so store the album list here too; without
+            // it the first drag produced no tracks and only the (async) tree load made the next one work.
+            m_albumsByArtist.insert(id, albums);
             for(const QJsonValue& album : albums) {
                 const QString albumId = album.toObject().value(u"id"_s).toString();
                 if(albumId.isEmpty() || m_songsByAlbum.contains(albumId)) {

@@ -266,7 +266,7 @@ public:
     {
         // The device lives on the decoder thread, which has no event loop, so a timer bound to it never
         // fires. Run the delay on the network thread (which does) and keep a QPointer to the device.
-        const auto network                 = m_network;
+        const auto network = m_network;
         const QPointer<SubsonicStreamDevice> device{this};
         QMetaObject::invokeMethod(network.get(), [network, device, from] {
             QTimer::singleShot(StreamRetryDelayMs, network.get(), [device, from] {
@@ -297,7 +297,7 @@ public:
             m_state->requestedStart   = 0;
             m_state->rangeCapable     = false;
             m_state->headersProcessed = false;
-            m_state->status            = 0;
+            m_state->status           = 0;
             m_state->pendingRequest   = false;
             m_state->skipTo          = -1;
             m_state->finished         = false;
@@ -313,21 +313,25 @@ public:
 
         // Wait briefly for headers so size()/canSeek() are valid during decoder init.
         QString error;
-        bool responded{false};
+        qint64 total{-1};
+        int status{0};
+        bool seekable{false};
         {
             std::unique_lock lock{m_state->mutex};
             m_state->ready.wait_for(lock, OpenHeaderTimeout, [this] {
                 return m_state->headersProcessed || m_state->finished || !m_state->error.isEmpty();
             });
-            error     = m_state->error;
-            responded = m_state->status >= 200;
-            qCDebug(SUBSONIC) << "stream" << m_id << "opened: total" << m_state->total << "status" << m_state->status
-                              << "seekable" << m_state->canSeek() << "error" << error;
+            error    = m_state->error;
+            total    = m_state->total;
+            status   = m_state->status;
+            seekable = m_state->canSeek();
         }
 
-        if(error.isEmpty() && !responded) {
+        if(error.isEmpty() && status < 200) {
             error = QStringLiteral("No response from the server.");
         }
+        qCDebug(SUBSONIC) << "stream" << m_id << "open result: total" << total << "status" << status << "seekable"
+                          << seekable << "error" << error;
         if(!error.isEmpty()) {
             // Reporting an empty stream as "opened" made the player treat the track as a live stream and
             // grey out the seekbar instead of failing it.
@@ -381,6 +385,12 @@ public:
         bool handled{false};
         qint64 bufferBase{0};
         qsizetype bufferBytes{0};
+        qint64 total{-1};
+        qint64 skipTo{-1};
+        qsizetype readPos{0};
+        bool finished{false};
+        bool pendingRequest{false};
+        bool nonBlocking{false};
         {
             const std::scoped_lock lock{m_state->mutex};
             if(m_state->aborted) {
@@ -403,13 +413,17 @@ public:
                 m_state->skipTo = pos;
                 handled         = true;
             }
+            total          = m_state->total;
+            skipTo         = m_state->skipTo;
+            readPos        = m_state->readPos;
+            finished       = m_state->finished;
+            pendingRequest = m_state->pendingRequest;
+            nonBlocking    = m_state->nonBlocking;
         }
         qCDebug(SUBSONIC) << "stream" << m_id << "seek" << pos << (handled ? "buffered/wait" : "refetch")
-                          << "bufferBase" << bufferBase << "bufferBytes" << bufferBytes
-                          << "readPos" << m_state->readPos << "total" << m_state->total << "skipTo"
-                          << m_state->skipTo << "finished" << m_state->finished << "pending"
-                          << m_state->pendingRequest << "nonBlocking" << m_state->nonBlocking << "t"
-                          << m_clock.elapsed();
+                          << "bufferBase" << bufferBase << "bufferBytes" << bufferBytes << "readPos" << readPos
+                          << "total" << total << "skipTo" << skipTo << "finished" << finished << "pending"
+                          << pendingRequest << "nonBlocking" << nonBlocking << "t" << m_clock.elapsed();
         if(handled) {
             return QIODevice::seek(pos);
         }
@@ -425,17 +439,17 @@ public:
             // FFmpeg's backwards probe seeks are served from memory. Forward seek: start exactly at the
             // target so the first decoded frame arrives without downloading a useless prefix.
             const qint64 requestedStart = pos < bufferBase ? std::max<qint64>(0, pos - SeekBackMargin) : pos;
-            const qsizetype readPos    = static_cast<qsizetype>(pos - requestedStart);
+            const qsizetype targetPos  = static_cast<qsizetype>(pos - requestedStart);
 
             oldReply                  = m_state->reply;
             m_state->reply.clear();
             m_state->buffer.clear();
-            m_state->readPos          = readPos;
+            m_state->readPos          = targetPos;
             m_state->bufferBase       = requestedStart;
             m_state->skip             = 0;
             m_state->requestedStart   = requestedStart;
             m_state->headersProcessed = false;
-            m_state->status            = 0;
+            m_state->status           = 0;
             m_state->pendingRequest   = true;
             m_state->skipTo           = -1;
             m_state->finished         = false;

@@ -259,7 +259,17 @@ public:
     //! Resumes the transfer from @p from after a dropped connection. Called on the decoder thread.
     void scheduleRetry(qint64 from)
     {
-        QTimer::singleShot(StreamRetryDelayMs, this, [this, from] { startRequest(from); });
+        // The device lives on the decoder thread, which has no event loop, so a timer bound to it never
+        // fires. Run the delay on the network thread (which does) and keep a QPointer to the device.
+        const auto network                 = m_network;
+        const QPointer<SubsonicStreamDevice> device{this};
+        QMetaObject::invokeMethod(network.get(), [network, device, from] {
+            QTimer::singleShot(StreamRetryDelayMs, network.get(), [device, from] {
+                if(device) {
+                    device->startRequest(from);
+                }
+            });
+        });
     }
 
     bool open(OpenMode mode) override
@@ -308,7 +318,8 @@ public:
     void close() override
     {
         if(!m_state->aborted) {
-            qCDebug(SUBSONIC) << "stream" << m_id << "close t" << m_clock.elapsed() << "requests" << m_requests;
+            qCDebug(SUBSONIC) << "stream" << m_id << "close t" << m_clock.elapsed() << "requests"
+                              << m_requests.load();
         }
         QPointer<QNetworkReply> reply;
         {
@@ -562,7 +573,7 @@ private:
         const QPointer<SubsonicStreamDevice> device{this};
 
         const int id          = m_id;
-        const int requestNo   = ++m_requests;
+        const int requestNo   = m_requests.fetch_add(1) + 1;
         const qint64 openedAt = m_clock.elapsed();
         qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "range" << rangeStart << "from readPos"
                           << QIODevice::pos() << "t" << openedAt;
@@ -675,7 +686,7 @@ private:
     qsizetype m_bufferBytes{DefaultBufferBytes};
     std::shared_ptr<StreamState> m_state;
     int m_id{nextDeviceId()};
-    int m_requests{0};
+    std::atomic<int> m_requests{0}; // touched from both the decoder and the network thread
     QElapsedTimer m_clock;
     qsizetype m_bytesRead{0};
     qint64 m_lastRateLog{-1000};

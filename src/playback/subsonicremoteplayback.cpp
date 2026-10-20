@@ -48,6 +48,9 @@ constexpr auto OpenHeaderTimeout = std::chrono::seconds{10};
 constexpr qint64 DefaultBufferBytes = 64LL * 1024 * 1024;
 constexpr int MaxStreamRetries = 3;
 constexpr int StreamRetryDelayMs = 500;
+// A dropped link does not reset the socket, so QNAM keeps the reply "in progress" and a blocked read
+// never returns, freezing pause/seek until the network comes back. Time out on inactivity instead.
+constexpr int StreamIdleTimeoutMs = 5000;
 // FFmpeg probes a few KB backwards after a seek to find the frame boundary. Fetch this much before a
 // backward target so that probe hits memory, but keep it small: the pre-roll has to download before the
 // target byte is readable, and a megabyte-scale margin made every seek wait for it.
@@ -570,6 +573,7 @@ private:
                               << openedAt;
             QNetworkRequest request = makeNetworkRequest(
                 url, NetworkRequestOption::AlwaysNetwork | NetworkRequestOption::AcceptAny);
+            request.setTransferTimeout(StreamIdleTimeoutMs);
             if(rangeStart > 0) {
                 request.setRawHeader("Range", QByteArrayLiteral("bytes=") + QByteArray::number(rangeStart) + '-');
             }

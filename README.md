@@ -53,10 +53,9 @@ Then copy `build/fyplugin_foonic.so` as above, or install system-wide with
 - Or add the **Foonic Browser** layout widget (under *Internet*) to embed it in a layout.
 
 The browser has a **Filter** box that searches the server (Subsonic `search3`, falling back to
-`search2`) for matching artists, albums and songs and shows them as grouped results (input is
-debounced).
+`search2`) for matching artists, albums, playlists and songs and shows them as grouped results.
 
-Expand an artist to load its albums and an album to load its songs. Drag a selection onto a playlist,
+Drag a selection onto a playlist,
 right-click for Play / Add to Playlist / Play Next / Add to Queue / Download to Library / Star /
 Unstar, or double-click a song to play it. Right-click empty space for **Random songs** and
 **Starred songs**, right-click songs to add them to a **server playlist** (or create one), and

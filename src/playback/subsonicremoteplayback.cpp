@@ -82,6 +82,7 @@ struct StreamState
     qint64 skipTo{-1}; // file offset to wait for on a forward seek, -1 = none
     bool rangeCapable{false};
     bool headersProcessed{false};
+    int status{0}; // HTTP status of the current reply, 0 = none
     bool pendingRequest{false};
     int attempts{0};
     bool nonBlocking{false};
@@ -106,6 +107,10 @@ struct StreamState
     //! Reads whatever the reply has buffered. Caller must hold the mutex.
     void appendFromReply(QNetworkReply* source)
     {
+        if(!source->isOpen()) {
+            return;
+        }
+
         // Retain consumed history so backward seeks stay in memory; only drop it once the buffer is full.
         if(buffer.size() >= maxBytes && readPos > 0) {
             bufferBase += readPos;
@@ -142,6 +147,7 @@ struct StreamState
             return;
         }
         headersProcessed = true;
+        status           = source->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
         const QByteArray contentRange = source->rawHeader("Content-Range");
         if(!contentRange.isEmpty()) {
@@ -153,8 +159,8 @@ struct StreamState
                 skip = std::max<qint64>(0, requestedStart - range.start);
             }
             rangeCapable = true;
-            qCDebug(SUBSONIC) << "stream headers: content-range" << contentRange << "total" << total << "skip"
-                              << skip;
+            qCDebug(SUBSONIC) << "stream headers: status" << status << "content-range" << contentRange << "total"
+                              << total << "skip" << skip;
             return;
         }
 
@@ -166,7 +172,6 @@ struct StreamState
             rangeCapable = true;
         }
         // The server ignored our Range request and is sending from 0 again.
-        const int status = source->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if(status == 200 && requestedStart > 0) {
             skip = requestedStart;
         }
@@ -292,6 +297,7 @@ public:
             m_state->requestedStart   = 0;
             m_state->rangeCapable     = false;
             m_state->headersProcessed = false;
+            m_state->status            = 0;
             m_state->pendingRequest   = false;
             m_state->skipTo          = -1;
             m_state->finished         = false;
@@ -306,12 +312,29 @@ public:
         startRequest(0);
 
         // Wait briefly for headers so size()/canSeek() are valid during decoder init.
-        std::unique_lock lock{m_state->mutex};
-        m_state->ready.wait_for(lock, OpenHeaderTimeout, [this] {
-            return m_state->headersProcessed || m_state->finished || !m_state->error.isEmpty();
-        });
-        qCDebug(SUBSONIC) << "stream opened: total" << m_state->total << "seekable" << m_state->canSeek()
-                          << "error" << m_state->error;
+        QString error;
+        bool responded{false};
+        {
+            std::unique_lock lock{m_state->mutex};
+            m_state->ready.wait_for(lock, OpenHeaderTimeout, [this] {
+                return m_state->headersProcessed || m_state->finished || !m_state->error.isEmpty();
+            });
+            error     = m_state->error;
+            responded = m_state->status >= 200;
+            qCDebug(SUBSONIC) << "stream" << m_id << "opened: total" << m_state->total << "status" << m_state->status
+                              << "seekable" << m_state->canSeek() << "error" << error;
+        }
+
+        if(error.isEmpty() && !responded) {
+            error = QStringLiteral("No response from the server.");
+        }
+        if(!error.isEmpty()) {
+            // Reporting an empty stream as "opened" made the player treat the track as a live stream and
+            // grey out the seekbar instead of failing it.
+            setErrorString(error);
+            close();
+            return false;
+        }
         return true;
     }
 
@@ -412,6 +435,7 @@ public:
             m_state->skip             = 0;
             m_state->requestedStart   = requestedStart;
             m_state->headersProcessed = false;
+            m_state->status            = 0;
             m_state->pendingRequest   = true;
             m_state->skipTo           = -1;
             m_state->finished         = false;
@@ -483,8 +507,12 @@ protected:
         }
         if(!ready) {
             m_state->readWouldBlock = true;
-            qCDebug(SUBSONIC) << "stream" << m_id << "read would-block at" << QIODevice::pos() << "buffered"
-                              << m_state->buffered() << "t" << m_clock.elapsed();
+            const qint64 now         = m_clock.elapsed();
+            if(now - m_lastWouldBlockLog >= 1000) {
+                m_lastWouldBlockLog = now;
+                qCDebug(SUBSONIC) << "stream" << m_id << "read would-block at" << QIODevice::pos() << "buffered"
+                                  << m_state->buffered() << "t" << now;
+            }
             return -1;
         }
         if(m_state->skipTo >= 0) {
@@ -690,6 +718,7 @@ private:
     QElapsedTimer m_clock;
     qsizetype m_bytesRead{0};
     qint64 m_lastRateLog{-1000};
+    qint64 m_lastWouldBlockLog{-1000};
 };
 
 class SubsonicRemoteSourceProvider : public RemoteSourceProvider

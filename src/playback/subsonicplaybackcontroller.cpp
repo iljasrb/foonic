@@ -44,6 +44,10 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
     });
     connect(m_player, &PlayerController::positionChanged, this,
             [this](uint64_t ms) { maybeScrobble(ms); });
+    connect(m_player, &PlayerController::playStateChanged, this,
+            [](Player::PlayState state, Player::PlayState previous) {
+                qCDebug(SUBSONIC) << "player state" << static_cast<int>(previous) << "->" << static_cast<int>(state);
+            });
     // fooyin's seek container refreshes the elapsed label only on positionChanged, which the engine
     // publishes after the new position is prefetched. Republish it immediately so a remote seek shows
     // the target at once instead of snapping back at the end.

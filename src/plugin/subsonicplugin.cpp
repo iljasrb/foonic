@@ -26,6 +26,7 @@
 #include <utils/utils.h>
 
 #include <QAction>
+#include <QLoggingCategory>
 #include <QMainWindow>
 
 using namespace Qt::StringLiterals;
@@ -35,6 +36,12 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
 {
     m_network  = context.networkAccess;
     m_settings = context.settingsManager;
+
+    // Debug aid: stamp every log line with wall clock, process uptime and thread so stalls can be timed
+    // against the engine output. Respects an explicit QT_MESSAGE_PATTERN.
+    if(qEnvironmentVariableIsEmpty("QT_MESSAGE_PATTERN")) {
+        qSetMessagePattern(u"[%{time hh:mm:ss.zzz} +%{time process}ms] [%{threadid}] %{category}: %{message}"_s);
+    }
 
     registerSubsonicSettings(m_settings);
 
@@ -52,6 +59,11 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
     // sync with the plugin setting (it also has to be re-applied when the setting changes).
     m_settings->set(QStringLiteral("Engine/RemotePrebufferMs"),
                     loadSubsonicSettings(m_settings).remotePrebufferMs);
+
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    qCInfo(SUBSONIC) << "settings: format" << settings.format << "maxBitRate" << settings.maxBitRate
+                     << "streamBufferMb" << settings.streamBufferMb << "remotePrebufferMs"
+                     << settings.remotePrebufferMs;
 }
 
 void SubsonicPlugin::initialise(const GuiPluginContext& context)

@@ -19,6 +19,7 @@
 #include <core/track.h>
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QIODevice>
 #include <QMetaObject>
 #include <QNetworkAccessManager>
@@ -31,6 +32,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -46,12 +48,20 @@ constexpr auto OpenHeaderTimeout = std::chrono::seconds{10};
 constexpr qint64 DefaultBufferBytes = 64LL * 1024 * 1024;
 constexpr int MaxStreamRetries = 3;
 constexpr int StreamRetryDelayMs = 500;
-// FFmpeg probes backwards after a seek to find the exact frame, and its binary search can span a
-// megabyte or more (seektable points, not just frame boundaries). A backward seek target fetches this
-// margin behind it so the whole probe burst hits memory instead of issuing one HTTP request per probe.
-// Forward seeks start exactly at the target: the bytes before it were never downloaded this session,
-// and pre-fetching them would only delay the first decoded frame.
-constexpr qint64 SeekBackMarginFloor = 1024LL * 1024;
+// FFmpeg probes a few KB backwards after a seek to find the frame boundary. Fetch this much before a
+// backward target so that probe hits memory, but keep it small: the pre-roll has to download before the
+// target byte is readable, and a megabyte-scale margin made every seek wait for it.
+constexpr qint64 SeekBackMargin = 128LL * 1024;
+// A forward seek within this distance keeps the buffer and waits for the running download to reach the
+// target instead of re-requesting: FFmpeg jumps to the end of the file before bisecting, and discarding
+// the buffer there threw away tens of megabytes on every seek.
+constexpr qint64 ForwardWaitGap = 32LL * 1024 * 1024;
+// Diagnostics: identifies each device instance and request in the debug log.
+int nextDeviceId()
+{
+    static std::atomic<int> next{0};
+    return ++next;
+}
 } // namespace
 
 namespace Fooyin::Subsonic {
@@ -181,6 +191,11 @@ public:
         SubsonicStreamDevice::close();
     }
 
+    [[nodiscard]] int id() const
+    {
+        return m_id;
+    }
+
     [[nodiscard]] bool isSequential() const override
     {
         return !canSeek();
@@ -272,6 +287,8 @@ public:
         }
 
         QIODevice::open(mode);
+        m_clock.start();
+        qCDebug(SUBSONIC) << "stream" << m_id << "open";
         startRequest(0);
 
         // Wait briefly for headers so size()/canSeek() are valid during decoder init.
@@ -286,6 +303,9 @@ public:
 
     void close() override
     {
+        if(!m_state->aborted) {
+            qCDebug(SUBSONIC) << "stream" << m_id << "close t" << m_clock.elapsed() << "requests" << m_requests;
+        }
         QPointer<QNetworkReply> reply;
         {
             const std::scoped_lock lock{m_state->mutex};
@@ -338,16 +358,20 @@ public:
                 m_state->skipTo  = -1;
                 handled          = true;
             }
-            else if(pos > end && pos - end <= std::max<qint64>(1024 * 1024, m_bufferBytes / 32) && m_state->reply
-                    && !m_state->finished && m_state->error.isEmpty()) {
+            else if(pos > end && pos - end <= ForwardWaitGap && m_state->reply && !m_state->finished
+                    && m_state->error.isEmpty()) {
                 // Still downloading forward: wait for it to cover `pos` instead of dropping the buffer
                 // (which would also lose everything already downloaded behind us).
                 m_state->skipTo = pos;
                 handled         = true;
             }
         }
-        qCDebug(SUBSONIC) << "seek" << pos << (handled ? "buffered/wait" : "refetch") << "bufferBase"
-                          << bufferBase << "bufferBytes" << bufferBytes;
+        qCDebug(SUBSONIC) << "stream" << m_id << "seek" << pos << (handled ? "buffered/wait" : "refetch")
+                          << "bufferBase" << bufferBase << "bufferBytes" << bufferBytes
+                          << "readPos" << m_state->readPos << "total" << m_state->total << "skipTo"
+                          << m_state->skipTo << "finished" << m_state->finished << "pending"
+                          << m_state->pendingRequest << "nonBlocking" << m_state->nonBlocking << "t"
+                          << m_clock.elapsed();
         if(handled) {
             return QIODevice::seek(pos);
         }
@@ -362,8 +386,7 @@ public:
             // Backward seek (target below what we've downloaded): fetch a margin behind the target so
             // FFmpeg's backwards probe seeks are served from memory. Forward seek: start exactly at the
             // target so the first decoded frame arrives without downloading a useless prefix.
-            const qint64 backwardMargin = std::max<qint64>(SeekBackMarginFloor, m_bufferBytes / 32);
-            const qint64 requestedStart = pos < bufferBase ? std::max<qint64>(0, pos - backwardMargin) : pos;
+            const qint64 requestedStart = pos < bufferBase ? std::max<qint64>(0, pos - SeekBackMargin) : pos;
             const qsizetype readPos    = static_cast<qsizetype>(pos - requestedStart);
 
             oldReply                  = m_state->reply;
@@ -423,6 +446,8 @@ protected:
             }
             return m_state->buffered() > 0 || m_state->finished || m_state->aborted || !m_state->error.isEmpty();
         };
+        QElapsedTimer stall;
+        stall.start();
         bool ready{true};
         if(m_state->nonBlocking) {
             ready = m_state->ready.wait_for(lock, token, std::chrono::milliseconds{50}, readable);
@@ -431,18 +456,37 @@ protected:
             m_state->ready.wait(lock, token, readable);
         }
         m_state->readWouldBlock = false;
+        if(stall.elapsed() >= 200) {
+            qCDebug(SUBSONIC) << "stream" << m_id << "read stalled" << stall.elapsed() << "ms at" << QIODevice::pos()
+                              << "buffered" << m_state->buffered() << "base" << m_state->bufferBase << "skipTo"
+                              << m_state->skipTo << "finished" << m_state->finished << "t" << m_clock.elapsed();
+        }
 
         if(token.stop_requested()) {
+            qCDebug(SUBSONIC) << "stream" << m_id << "read aborted by stop token at" << QIODevice::pos();
             return -1;
         }
         if(!ready) {
             m_state->readWouldBlock = true;
+            qCDebug(SUBSONIC) << "stream" << m_id << "read would-block at" << QIODevice::pos() << "buffered"
+                              << m_state->buffered() << "t" << m_clock.elapsed();
             return -1;
         }
         if(m_state->skipTo >= 0) {
-            m_state->readPos = static_cast<qsizetype>(
-                std::min<qint64>(m_state->skipTo - m_state->bufferBase, m_state->buffer.size()));
-            m_state->skipTo = -1;
+            const qint64 end = m_state->bufferBase + m_state->buffer.size();
+            if(end < m_state->skipTo) {
+                // The transfer ended before reaching the seek target: fail rather than serve the wrong
+                // bytes from the old position.
+                const qint64 target = m_state->skipTo;
+                m_state->skipTo     = -1;
+                lock.unlock();
+                qCWarning(SUBSONIC) << "stream" << m_id << "ended" << target - end << "bytes short of seek target"
+                                    << target;
+                setErrorString(QStringLiteral("Stream ended before the seek target."));
+                return -1;
+            }
+            m_state->readPos = static_cast<qsizetype>(m_state->skipTo - m_state->bufferBase);
+            m_state->skipTo  = -1;
         }
         if(!m_state->error.isEmpty()) {
             const QString error = m_state->error;
@@ -457,6 +501,7 @@ protected:
         const qsizetype count = std::min<qsizetype>(m_state->buffered(), maxSize);
         std::memcpy(data, m_state->buffer.constData() + m_state->readPos, count);
         m_state->readPos += count;
+        logReadRate(count);
 
         const QPointer<QNetworkReply> reply = m_state->reply;
         lock.unlock();
@@ -489,6 +534,20 @@ protected:
     }
 
 private:
+    //! One line per second while streaming: shows whether decoding continues (e.g. while paused).
+    void logReadRate(qsizetype count)
+    {
+        m_bytesRead += count;
+        const qint64 now = m_clock.elapsed();
+        if(now - m_lastRateLog < 1000) {
+            return;
+        }
+        qCDebug(SUBSONIC) << "stream" << m_id << "read rate" << m_bytesRead << "B/s at" << QIODevice::pos()
+                          << "buffered" << m_state->buffered() << "t" << now;
+        m_bytesRead   = 0;
+        m_lastRateLog = now;
+    }
+
     void startRequest(qint64 rangeStart)
     {
         const QUrl url         = m_url;
@@ -498,7 +557,16 @@ private:
         const qsizetype bufferBytes = m_bufferBytes;
         const QPointer<SubsonicStreamDevice> device{this};
 
-        QMetaObject::invokeMethod(network.get(), [network, url, ignoreSsl, state, rangeStart, bufferBytes, device] {
+        const int id          = m_id;
+        const int requestNo   = ++m_requests;
+        const qint64 openedAt = m_clock.elapsed();
+        qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "range" << rangeStart << "from readPos"
+                          << QIODevice::pos() << "t" << openedAt;
+
+        QMetaObject::invokeMethod(network.get(), [network, url, ignoreSsl, state, rangeStart, bufferBytes, device, id,
+                                                  requestNo, openedAt] {
+            qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "dispatched on network thread t"
+                              << openedAt;
             QNetworkRequest request = makeNetworkRequest(
                 url, NetworkRequestOption::AlwaysNetwork | NetworkRequestOption::AcceptAny);
             if(rangeStart > 0) {
@@ -519,6 +587,9 @@ private:
                     reply->abort();
                     reply->deleteLater();
                     return;
+                }
+                if(state->reply && state->reply != reply) {
+                    qCDebug(SUBSONIC) << "stream" << id << "reply superseded by request" << requestNo;
                 }
                 state->reply = reply;
             }
@@ -544,7 +615,7 @@ private:
                 state->ready.notify_all();
             });
 
-            QObject::connect(reply, &QNetworkReply::finished, reply, [device, state, reply] {
+            QObject::connect(reply, &QNetworkReply::finished, reply, [device, state, reply, id, requestNo] {
                 qint64 retryFrom{-1};
                 {
                     const std::scoped_lock lock{state->mutex};
@@ -555,6 +626,8 @@ private:
                             if(reply->error() != QNetworkReply::NoError && state->attempts < MaxStreamRetries) {
                                 // Resume from where we got to instead of failing the whole track.
                                 ++state->attempts;
+                                qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "failed:"
+                                                  << reply->errorString() << "retry" << state->attempts;
                                 retryFrom              = state->bufferBase + state->buffer.size();
                                 state->headersProcessed = false;
                                 state->requestedStart   = retryFrom;
@@ -563,6 +636,8 @@ private:
                             else {
                                 if(reply->error() != QNetworkReply::NoError && state->error.isEmpty()) {
                                     state->error = reply->errorString();
+                                    qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "gave up:"
+                                                      << state->error;
                                 }
                                 state->finished = true;
                                 state->reply.clear();
@@ -577,7 +652,10 @@ private:
                 }
             });
 
-            QObject::connect(reply, &QNetworkReply::errorOccurred, reply, [state, reply](QNetworkReply::NetworkError) {
+            QObject::connect(reply, &QNetworkReply::errorOccurred, reply, [state, reply, id, requestNo](
+                                                                               QNetworkReply::NetworkError error) {
+                qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "error" << static_cast<int>(error)
+                                  << reply->errorString();
                 {
                     const std::scoped_lock lock{state->mutex};
                     if(reply == state->reply && !state->aborted && state->error.isEmpty()) {
@@ -594,6 +672,11 @@ private:
     bool m_ignoreSslErrors;
     qsizetype m_bufferBytes{DefaultBufferBytes};
     std::shared_ptr<StreamState> m_state;
+    int m_id{nextDeviceId()};
+    int m_requests{0};
+    QElapsedTimer m_clock;
+    qsizetype m_bytesRead{0};
+    qint64 m_lastRateLog{-1000};
 };
 
 class SubsonicRemoteSourceProvider : public RemoteSourceProvider
@@ -687,9 +770,13 @@ public:
 
         const auto format = m_inner->init(innerSource, innerTrack, options);
         if(!format) {
+            qCWarning(SUBSONIC) << "decoder init failed on stream" << (streamDevice ? streamDevice->id() : -1);
             m_inner.reset();
             return {};
         }
+        qCDebug(SUBSONIC) << "decoder init: stream" << (streamDevice ? streamDevice->id() : -1) << "innerSeekable"
+                          << m_inner->isSeekable() << "concurrent" << m_inner->allowsConcurrentDecoding()
+                          << "prebufferMs" << m_inner->playbackPrebufferMs();
 
         const auto* device = dynamic_cast<SubsonicStreamDevice*>(source.device);
         m_seekable         = m_inner->isSeekable() && device && device->canSeek();
@@ -705,6 +792,7 @@ public:
 
     void stop() override
     {
+        qCDebug(SUBSONIC) << "decoder stop";
         if(m_inner) {
             m_inner->stop();
         }
@@ -712,6 +800,7 @@ public:
 
     void seek(uint64_t pos) override
     {
+        qCDebug(SUBSONIC) << "decoder seek" << pos;
         if(m_inner) {
             m_inner->seek(pos);
         }
@@ -770,6 +859,7 @@ public:
 protected:
     void interruptRead() override
     {
+        qCDebug(SUBSONIC) << "decoder interrupt read";
         if(m_inner) {
             m_inner->requestAbort();
         }

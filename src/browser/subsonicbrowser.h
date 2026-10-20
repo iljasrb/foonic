@@ -56,6 +56,37 @@ enum class MatchMode
     AnyWord,
 };
 
+enum class ArtistSort : uint8_t
+{
+    ServerOrder = 0,
+    Name,
+    NameDescending,
+    AlbumCount,
+};
+
+enum class PlaylistSort : uint8_t
+{
+    ServerOrder = 0,
+    Name,
+    Created,
+    Changed,
+};
+
+enum class AlbumSort : uint8_t
+{
+    // Local: sorts each artist's album children.
+    ServerOrder = 0,
+    Name,
+    Year,
+    SongCount,
+    // Server: replaces the whole view with a getAlbumList2 album listing.
+    Newest,
+    Recent,
+    Frequent,
+    Highest,
+    Starred,
+};
+
 /*!
  * The Subsonic artist/album/song browser, usable in a dialog or embedded in a layout widget.
  */
@@ -92,7 +123,8 @@ private:
     void showContextMenu(const QPoint& pos);
     void showHeaderMenu(const QPoint& pos);
     void showDiscoveryMenu(const QPoint& pos);
-    void showDiscoverySongs(const QString& title, const QList<QJsonObject>& songs);
+    void showDiscoverySongs(const QString& title, const QJsonArray& songs);
+    void showServerAlbumList(const QString& type, int offset = 0);
     void createServerPlaylist(const QStringList& songIds);
     void addSongsToServerPlaylist(const QString& id, const QStringList& songIds);
     void renameSelectedPlaylist(QTreeWidgetItem* item);
@@ -110,6 +142,8 @@ private:
     [[nodiscard]] Track trackForSong(const QJsonObject& song, const QString& filepath) const;
     [[nodiscard]] QString coverCachePath(const QString& coverArtId) const;
     [[nodiscard]] QString downloadedText(const QJsonObject& song) const;
+    [[nodiscard]] QString albumSortLabel(AlbumSort mode) const;
+    void clearFilter();
     void updateDownloadedColumn();
     void applyCover(QTreeWidgetItem* item, const QString& coverArtId);
     void requestCover(const QString& coverArtId);
@@ -145,9 +179,21 @@ private:
     bool m_searchSongs{true};
     bool m_searchPlaylists{true};
     MatchMode m_matchMode{MatchMode::Contains};
+    ArtistSort m_artistSort{ArtistSort::ServerOrder};
+    PlaylistSort m_playlistSort{PlaylistSort::ServerOrder};
+    AlbumSort m_albumSort{AlbumSort::ServerOrder};
+    QString m_albumListTitle; // menu label of the active server album list
+    QTreeWidgetItem* m_albumListHeader{nullptr};
+    QTreeWidgetItem* m_albumListMore{nullptr};
+    int m_albumListLoaded{0};
+    bool m_albumListLoading{false};
+    QTreeWidgetItem* m_playlistsHeader{nullptr};
     std::map<QTreeWidgetItem*, std::vector<std::function<void()>>> m_pendingLoads;
     std::set<QTreeWidgetItem*> m_loading;
     QHash<QString, QPixmap> m_coverCache;
+    mutable QHash<QString, QString> m_downloadedCache; // song id -> Downloaded column text
+    QList<QPair<QAction*, bool*>> m_scopeActions;      // search-scope actions and the flag they toggle
+    QList<QAction*> m_matchActions;
     QSet<QString> m_coverRequests;
     QList<QJsonObject> m_artists;
     QList<QJsonObject> m_playlists;

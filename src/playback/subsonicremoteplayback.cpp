@@ -91,7 +91,7 @@ struct StreamState
     }
 
     //! Reads whatever the reply has buffered. Caller must hold the mutex.
-    void appendFromReply(QNetworkReply* reply)
+    void appendFromReply(QNetworkReply* source)
     {
         // Retain consumed history so backward seeks stay in memory; only drop it once the buffer is full.
         if(buffer.size() >= maxBytes && readPos > 0) {
@@ -105,7 +105,7 @@ struct StreamState
             return;
         }
 
-        QByteArray chunk = reply->read(space + skip);
+        QByteArray chunk = source->read(space + skip);
         if(chunk.isEmpty()) {
             return;
         }
@@ -122,14 +122,14 @@ struct StreamState
     }
 
     //! Derives size/range support/skip offset from response headers. Caller must hold the mutex.
-    void updateHeaders(QNetworkReply* reply)
+    void updateHeaders(QNetworkReply* source)
     {
         if(headersProcessed) {
             return;
         }
         headersProcessed = true;
 
-        const QByteArray contentRange = reply->rawHeader("Content-Range");
+        const QByteArray contentRange = source->rawHeader("Content-Range");
         if(!contentRange.isEmpty()) {
             const ContentRange range = parseContentRange(contentRange);
             if(range.total >= 0) {
@@ -144,15 +144,15 @@ struct StreamState
             return;
         }
 
-        const qint64 contentLength = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        const qint64 contentLength = source->header(QNetworkRequest::ContentLengthHeader).toLongLong();
         if(contentLength > 0 && total < 0) {
             total = contentLength;
         }
-        if(reply->rawHeader("Accept-Ranges").toLower().contains("bytes")) {
+        if(source->rawHeader("Accept-Ranges").toLower().contains("bytes")) {
             rangeCapable = true;
         }
         // The server ignored our Range request and is sending from 0 again.
-        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const int status = source->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if(status == 200 && requestedStart > 0) {
             skip = requestedStart;
         }

@@ -21,6 +21,7 @@
 
 #include <QActionGroup>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFont>
 #include <QHBoxLayout>
@@ -38,6 +39,7 @@
 #include <QNetworkRequest>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTimer>
@@ -46,6 +48,8 @@
 #include <QTreeWidgetItem>
 #include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 using namespace Qt::StringLiterals;
 
@@ -64,11 +68,14 @@ enum ItemKind : uint8_t
     Song        = 3,
     ResultHeader = 4,
     PlaylistNode = 5,
+    LoadMore     = 6,
 };
 
 // Cap concurrent playlist-entry requests during a search scan so a large playlist library doesn't
 // flood the server.
 constexpr int MaxPlaylistFetches = 4;
+// Page size for getAlbumList2 album listings (the "Load more" row fetches the next page).
+constexpr int AlbumPageSize = 100;
 
 QJsonArray asArray(const QJsonValue& value)
 {
@@ -85,6 +92,7 @@ qint64 songSize(const QJsonObject& song)
 {
     return static_cast<qint64>(song.value(u"size"_s).toDouble());
 }
+
 
 // Stable identity of an expandable tree item, used to remember open/closed state across refreshes.
 QString expansionKey(const QTreeWidgetItem* item)
@@ -322,6 +330,111 @@ private:
 } // namespace
 
 namespace Fooyin::Subsonic {
+
+namespace {
+// OpenSubsonic sortName drops leading articles ("The Beatles" -> "Beatles").
+QString artistSortName(const QJsonObject& artist)
+{
+    const QString sortName = artist.value(u"sortName"_s).toString();
+    return sortName.isEmpty() ? artist.value(u"name"_s).toString() : sortName;
+}
+
+void sortArtists(QList<QJsonObject>& artists, ArtistSort mode)
+{
+    switch(mode) {
+        case ArtistSort::ServerOrder:
+            return;
+        case ArtistSort::Name:
+        case ArtistSort::NameDescending:
+            std::stable_sort(artists.begin(), artists.end(), [mode](const QJsonObject& a, const QJsonObject& b) {
+                const int cmp = artistSortName(a).compare(artistSortName(b), Qt::CaseInsensitive);
+                return mode == ArtistSort::Name ? cmp < 0 : cmp > 0;
+            });
+            return;
+        case ArtistSort::AlbumCount:
+            std::stable_sort(artists.begin(), artists.end(), [](const QJsonObject& a, const QJsonObject& b) {
+                return a.value(u"albumCount"_s).toInt() > b.value(u"albumCount"_s).toInt();
+            });
+            return;
+    }
+}
+
+qint64 isoTimestamp(const QJsonObject& object, const QString& field)
+{
+    return QDateTime::fromString(object.value(field).toString(), Qt::ISODate).toMSecsSinceEpoch();
+}
+
+void sortPlaylists(QList<QJsonObject>& playlists, PlaylistSort mode)
+{
+    switch(mode) {
+        case PlaylistSort::ServerOrder:
+            return;
+        case PlaylistSort::Name:
+            std::stable_sort(playlists.begin(), playlists.end(), [](const QJsonObject& a, const QJsonObject& b) {
+                return a.value(u"name"_s).toString().compare(b.value(u"name"_s).toString(), Qt::CaseInsensitive) < 0;
+            });
+            return;
+        case PlaylistSort::Created:
+        case PlaylistSort::Changed: {
+            const QString field = (mode == PlaylistSort::Created) ? u"created"_s : u"changed"_s;
+            std::stable_sort(playlists.begin(), playlists.end(), [field](const QJsonObject& a, const QJsonObject& b) {
+                return isoTimestamp(a, field) > isoTimestamp(b, field); // newest first
+            });
+            return;
+        }
+    }
+}
+
+QList<QJsonObject> sortedAlbums(const QJsonArray& array, AlbumSort mode)
+{
+    QList<QJsonObject> albums;
+    albums.reserve(array.size());
+    for(const QJsonValue& value : array) {
+        albums.push_back(value.toObject());
+    }
+
+    switch(mode) {
+        case AlbumSort::ServerOrder:
+            return albums;
+        case AlbumSort::Name:
+            std::stable_sort(albums.begin(), albums.end(), [](const QJsonObject& a, const QJsonObject& b) {
+                return a.value(u"name"_s).toString().compare(b.value(u"name"_s).toString(), Qt::CaseInsensitive) < 0;
+            });
+            return albums;
+        case AlbumSort::Year:
+            std::stable_sort(albums.begin(), albums.end(), [](const QJsonObject& a, const QJsonObject& b) {
+                return a.value(u"year"_s).toInt() < b.value(u"year"_s).toInt();
+            });
+            return albums;
+        case AlbumSort::SongCount:
+            std::stable_sort(albums.begin(), albums.end(), [](const QJsonObject& a, const QJsonObject& b) {
+                return a.value(u"songCount"_s).toInt() > b.value(u"songCount"_s).toInt();
+            });
+            return albums;
+        default:
+            return albums; // server-ordered lists are shown as returned
+    }
+}
+
+// getAlbumList2 type for a server-side album list, empty for the local per-artist sorts.
+QString serverAlbumType(AlbumSort mode)
+{
+    switch(mode) {
+        case AlbumSort::Newest:
+            return u"newest"_s;
+        case AlbumSort::Recent:
+            return u"recent"_s;
+        case AlbumSort::Frequent:
+            return u"frequent"_s;
+        case AlbumSort::Highest:
+            return u"highest"_s;
+        case AlbumSort::Starred:
+            return u"starred"_s;
+        default:
+            return {};
+    }
+}
+} // namespace
 SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, PlaylistInteractor* interactor,
                                  SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
                                  QWidget* parent)
@@ -334,6 +447,17 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     , m_status{new QLabel{this}}
     , m_tree{new SubsonicTreeWidget{this}}
 {
+    // Restore the saved sort choices (values are clamped in case the settings file was edited).
+    const auto savedSort = [this](const QString& key, int maxValue) {
+        return std::clamp(m_settings->value(key).toInt(), 0, maxValue);
+    };
+    m_artistSort = static_cast<ArtistSort>(
+        savedSort(u"Subsonic/ArtistSort"_s, static_cast<int>(ArtistSort::AlbumCount)));
+    m_albumSort = static_cast<AlbumSort>(savedSort(u"Subsonic/AlbumSort"_s, static_cast<int>(AlbumSort::Starred)));
+    m_playlistSort = static_cast<PlaylistSort>(
+        savedSort(u"Subsonic/PlaylistSort"_s, static_cast<int>(PlaylistSort::Changed)));
+    m_albumListTitle = albumSortLabel(m_albumSort);
+
     auto* tree = static_cast<SubsonicTreeWidget*>(m_tree);
     tree->mimeDataProvider = [this](const QList<QTreeWidgetItem*>& items) { return tracksForDrag(items); };
     tree->dragDataReady  = [this](const QList<QTreeWidgetItem*>& items) { return ensureDragData(items); };
@@ -357,7 +481,10 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
         connect(m_libraryDownloads, &SubsonicLibraryDownloader::warning, this,
                 [this](const QString& message) { setStatus(message); });
         connect(m_libraryDownloads, &SubsonicLibraryDownloader::downloaded, this,
-                [this](const QString&, const QJsonObject&, const QString&) { updateDownloadedColumn(); });
+                [this](const QString& songId, const QJsonObject&, const QString&) {
+                    m_downloadedCache.remove(songId); // re-probe this one, then refresh the column
+                    updateDownloadedColumn();
+                });
     }
 
     auto* refreshButton = new QPushButton{tr("Refresh"), this};
@@ -375,11 +502,13 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
                                    "Prefix a term with '-' to exclude it."));
 
     auto* filterMenu = new QMenu{m_filterOptions};
-    filterMenu->addSection(tr("Search in"));
-    const auto addScope = [this, filterMenu](const QString& text, bool& flag) {
-        auto* action = filterMenu->addAction(text);
+
+    QMenu* searchInMenu = filterMenu->addMenu(tr("Search in"));
+    const auto addScope = [this, searchInMenu](const QString& text, bool& flag) {
+        auto* action = searchInMenu->addAction(text);
         action->setCheckable(true);
         action->setChecked(flag);
+        m_scopeActions.push_back({action, &flag});
         connect(action, &QAction::toggled, this, [this, flagPtr = &flag](bool on) {
             *flagPtr = on;
             applyFilter();
@@ -390,13 +519,15 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     addScope(tr("Songs"), m_searchSongs);
     addScope(tr("Playlists"), m_searchPlaylists);
 
-    filterMenu->addSection(tr("Match"));
-    auto* matchGroup = new QActionGroup{filterMenu};
+    QMenu* matchMenu = filterMenu->addMenu(tr("Matching"));
+    auto* matchGroup = new QActionGroup{matchMenu};
     matchGroup->setExclusive(true);
-    const auto addMatch = [this, filterMenu, matchGroup](const QString& text, MatchMode mode) {
-        auto* action = filterMenu->addAction(text);
+    const auto addMatch = [this, matchMenu, matchGroup](const QString& text, MatchMode mode) {
+        auto* action = matchMenu->addAction(text);
         action->setCheckable(true);
         action->setChecked(m_matchMode == mode);
+        action->setData(static_cast<int>(mode));
+        m_matchActions.push_back(action);
         matchGroup->addAction(action);
         connect(action, &QAction::triggered, this, [this, mode] {
             m_matchMode = mode;
@@ -406,6 +537,81 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     addMatch(tr("Contains"), MatchMode::Contains);
     addMatch(tr("All words"), MatchMode::AllWords);
     addMatch(tr("Any word"), MatchMode::AnyWord);
+
+    filterMenu->addSeparator();
+    connect(filterMenu->addAction(tr("Clear filter")), &QAction::triggered, this, &SubsonicBrowser::clearFilter);
+    filterMenu->addSeparator();
+
+    QMenu* artistSortMenu = filterMenu->addMenu(tr("Sort artists"));
+    auto* sortGroup = new QActionGroup{artistSortMenu};
+    sortGroup->setExclusive(true);
+    const auto addSort = [this, artistSortMenu, sortGroup](const QString& text, ArtistSort mode) {
+        auto* action = artistSortMenu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(m_artistSort == mode);
+        sortGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode] {
+            m_artistSort = mode;
+            m_settings->set(u"Subsonic/ArtistSort"_s, static_cast<int>(mode));
+            if(!m_filterMode) {
+                rebuildArtistTree();
+            }
+        });
+    };
+    addSort(tr("Server order"), ArtistSort::ServerOrder);
+    addSort(tr("Name (A-Z)"), ArtistSort::Name);
+    addSort(tr("Name (Z-A)"), ArtistSort::NameDescending);
+    addSort(tr("Most albums"), ArtistSort::AlbumCount);
+
+    QMenu* playlistSortMenu = filterMenu->addMenu(tr("Sort playlists"));
+    auto* playlistSortGroup = new QActionGroup{playlistSortMenu};
+    playlistSortGroup->setExclusive(true);
+    const auto addPlaylistSort = [this, playlistSortMenu, playlistSortGroup](const QString& text,
+                                                                            PlaylistSort mode) {
+        auto* action = playlistSortMenu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(m_playlistSort == mode);
+        playlistSortGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode] {
+            m_playlistSort = mode;
+            m_settings->set(u"Subsonic/PlaylistSort"_s, static_cast<int>(mode));
+            if(!m_filterMode) {
+                rebuildArtistTree();
+            }
+        });
+    };
+    addPlaylistSort(tr("Server order"), PlaylistSort::ServerOrder);
+    addPlaylistSort(tr("Name (A-Z)"), PlaylistSort::Name);
+    addPlaylistSort(tr("Recently created"), PlaylistSort::Created);
+    addPlaylistSort(tr("Recently changed"), PlaylistSort::Changed);
+
+    QMenu* albumsMenu = filterMenu->addMenu(tr("Sort albums"));
+    auto* albumSortGroup = new QActionGroup{albumsMenu};
+    albumSortGroup->setExclusive(true);
+    const auto addAlbumSort = [this, albumsMenu, albumSortGroup](const QString& text, AlbumSort mode) {
+        auto* action = albumsMenu->addAction(text);
+        action->setCheckable(true);
+        action->setChecked(m_albumSort == mode);
+        albumSortGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, mode] {
+            m_albumSort      = mode;
+            m_albumListTitle = albumSortLabel(mode);
+            m_settings->set(u"Subsonic/AlbumSort"_s, static_cast<int>(mode));
+            if(!m_filterMode) {
+                rebuildArtistTree();
+            }
+        });
+    };
+    albumsMenu->addSection(tr("Inside each artist"));
+    addAlbumSort(tr("Server order"), AlbumSort::ServerOrder);
+    addAlbumSort(tr("Name (A-Z)"), AlbumSort::Name);
+    addAlbumSort(tr("Release year"), AlbumSort::Year);
+    addAlbumSort(tr("Most songs"), AlbumSort::SongCount);
+    albumsMenu->addSection(tr("Whole view from server"));
+    for(const AlbumSort mode : {AlbumSort::Newest, AlbumSort::Recent, AlbumSort::Frequent, AlbumSort::Highest,
+                                AlbumSort::Starred}) {
+        addAlbumSort(albumSortLabel(mode), mode);
+    }
     m_filterOptions->setMenu(filterMenu);
 
     m_filterTimer = new QTimer{this};
@@ -445,8 +651,16 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     });
     connect(m_tree, &QTreeWidget::itemExpanded, this, &SubsonicBrowser::onExpanded);
     connect(m_tree, &QTreeWidget::itemCollapsed, this, &SubsonicBrowser::onCollapsed);
-    connect(m_tree, &QTreeWidget::itemClicked, this,
-            [this](QTreeWidgetItem* item, int) { ensureChildrenLoaded(item); });
+    connect(m_tree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
+        if(item && item->data(0, KindRole).toInt() == LoadMore) {
+            const QString type = serverAlbumType(m_albumSort);
+            if(!type.isEmpty() && !m_albumListLoading) {
+                showServerAlbumList(type, m_albumListLoaded);
+            }
+            return;
+        }
+        ensureChildrenLoaded(item);
+    });
     connect(m_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
         if(!item) {
             return;
@@ -495,6 +709,7 @@ void SubsonicBrowser::refresh()
     m_artists.clear();
     m_playlists.clear();
     m_playlistEntries.clear();
+    m_downloadedCache.clear();
     m_playlistScanQueue.clear();
     ++m_playlistScanToken; // cancel any scan still in flight
     m_searchResultReady = false;
@@ -696,8 +911,8 @@ bool SubsonicBrowser::ensureDragData(const QList<QTreeWidgetItem*>& items)
         ++*remaining;
         m_client->getArtist(id, [this, id, finish, remaining](const QJsonObject& object, const QString& error) {
             const QJsonArray albums = error.isEmpty() ? asArray(object.value(u"album"_s)) : QJsonArray{};
-            // tracksForDrag builds an artist from this cache, so store the album list here too; without
-            // it the first drag produced no tracks and only the (async) tree load made the next one work.
+            // tracksForDrag builds an artist from this cache; without it the first drag found no
+            // tracks until the async tree load finished.
             m_albumsByArtist.insert(id, albums);
             for(const QJsonValue& album : albums) {
                 const QString albumId = album.toObject().value(u"id"_s).toString();
@@ -882,13 +1097,8 @@ void SubsonicBrowser::populateChildren(QTreeWidgetItem* item, int kind, const QJ
     if(kind == Artist) {
         const QJsonArray albums = asArray(object.value(u"album"_s));
         m_albumsByArtist.insert(item->data(0, IdRole).toString(), albums);
-        for(const QJsonValue& value : albums) {
-            auto* child = createAlbumItem(item, value.toObject());
-            addPlaceholder(child);
-
-            // Pre-load each album's songs so the artist (and album) can be dragged as a whole
-            // without expanding every album first.
-            ensureChildrenLoaded(child, false);
+        for(const QJsonObject& album : sortedAlbums(albums, m_albumSort)) {
+            addPlaceholder(createAlbumItem(item, album));
         }
     }
     else if(kind == Album) {
@@ -1247,12 +1457,7 @@ void SubsonicBrowser::showDiscoveryMenu(const QPoint& pos)
             setStatus(error);
             return;
         }
-        QList<QJsonObject> songs;
-        songs.reserve(items.size());
-        for(const QJsonValue& value : items) {
-            songs.push_back(value.toObject());
-        }
-        showDiscoverySongs(title, songs);
+        showDiscoverySongs(title, items);
     };
 
     if(chosen == randomAction) {
@@ -1261,7 +1466,7 @@ void SubsonicBrowser::showDiscoveryMenu(const QPoint& pos)
             show(tr("Random"), items, error);
         });
     }
-    else {
+    else if(chosen == starredAction) {
         setStatus(tr("Loading starred songs..."));
         m_client->getStarred([show](const QJsonArray& items, const QString& error) {
             show(tr("Starred"), items, error);
@@ -1269,7 +1474,74 @@ void SubsonicBrowser::showDiscoveryMenu(const QPoint& pos)
     }
 }
 
-void SubsonicBrowser::showDiscoverySongs(const QString& title, const QList<QJsonObject>& songs)
+void SubsonicBrowser::showServerAlbumList(const QString& type, int offset)
+{
+    setStatus(offset > 0 ? tr("Loading more albums...") : tr("Loading %1...").arg(m_albumListTitle.toLower()));
+    m_albumListLoading = true;
+
+    const int generation = m_generation;
+    m_client->getAlbumList2(
+        type,
+        [this, generation, type, offset](const QJsonArray& items, const QString& error) {
+            m_albumListLoading = false;
+            // Ignore a late reply if the user switched back to a per-artist sort meanwhile.
+            if(generation != m_generation || serverAlbumType(m_albumSort) != type) {
+                return;
+            }
+            if(!error.isEmpty()) {
+                setStatus(error);
+                return;
+            }
+
+            if(offset == 0) {
+                clearTree();
+                addPlaylistsHeader(); // playlists stay pinned at the top
+                m_albumListHeader = createResultHeader(QString{});
+                m_tree->addTopLevelItem(m_albumListHeader);
+                m_albumListHeader->setExpanded(true);
+            }
+            else if(!m_albumListHeader) {
+                return; // the listing was cleared while this page was in flight
+            }
+
+            // Keep the viewport where the user left it when appending another page.
+            const int scroll = m_tree->verticalScrollBar()->value();
+
+            // Drop the old "Load more" row; a fresh one is appended below if there is more.
+            delete m_albumListMore;
+            m_albumListMore = nullptr;
+
+            for(const QJsonObject& album : sortedAlbums(items, AlbumSort::ServerOrder)) {
+                addPlaceholder(createAlbumItem(m_albumListHeader, album));
+            }
+            m_albumListLoaded += static_cast<int>(items.size());
+
+            if(items.size() >= AlbumPageSize) {
+                m_albumListMore = new QTreeWidgetItem{m_albumListHeader};
+                m_albumListMore->setText(0, tr("Load more..."));
+                m_albumListMore->setData(0, KindRole, LoadMore);
+            }
+
+            m_albumListHeader->setText(0, tr("%1 (%2%3)")
+                                              .arg(m_albumListTitle)
+                                              .arg(m_albumListLoaded)
+                                              .arg(m_albumListMore ? u"+"_s : u""_s));
+            if(offset > 0) {
+                // Only the rows below the viewport changed, so restore the scroll offset instead of
+                // jumping to the new "Load more" row.
+                m_tree->verticalScrollBar()->setValue(scroll);
+            }
+            else {
+                m_tree->scrollToItem(m_albumListHeader);
+            }
+            setStatus(m_albumListLoaded == 0
+                          ? tr("%1: no albums (the server may not support this list).").arg(m_albumListTitle)
+                          : tr("%1: %2 album(s)").arg(m_albumListTitle).arg(m_albumListLoaded));
+        },
+        AlbumPageSize, offset);
+}
+
+void SubsonicBrowser::showDiscoverySongs(const QString& title, const QJsonArray& songs)
 {
     if(songs.isEmpty()) {
         setStatus(tr("%1: no songs.").arg(title));
@@ -1278,8 +1550,8 @@ void SubsonicBrowser::showDiscoverySongs(const QString& title, const QList<QJson
 
     auto* header = createResultHeader(tr("%1 (%2)").arg(title).arg(songs.size()));
     m_tree->insertTopLevelItem(0, header);
-    for(const QJsonObject& song : songs) {
-        createSongItem(header, song);
+    for(const QJsonValue& song : songs) {
+        createSongItem(header, song.toObject());
     }
     header->setExpanded(true);
     m_tree->scrollToItem(header);
@@ -1429,9 +1701,54 @@ QString SubsonicBrowser::coverCachePath(const QString& coverArtId) const
 
 QString SubsonicBrowser::downloadedText(const QJsonObject& song) const
 {
-    return m_libraryDownloads && !m_libraryDownloads->existingLocalPath(song).isEmpty()
-        ? u"\u2713 Downloaded"_s
-        : QString{};
+    // Cached: the probe hits the filesystem, and this runs for every song row that gets built.
+    const QString id = song.value(u"id"_s).toString();
+    if(const auto cached = m_downloadedCache.constFind(id); cached != m_downloadedCache.constEnd()) {
+        return cached.value();
+    }
+
+    const bool downloaded = m_libraryDownloads && !m_libraryDownloads->existingLocalPath(song).isEmpty();
+    const QString text   = downloaded ? u"\u2713 Downloaded"_s : QString{};
+    m_downloadedCache.insert(id, text);
+    return text;
+}
+
+QString SubsonicBrowser::albumSortLabel(AlbumSort mode) const
+{
+    switch(mode) {
+        case AlbumSort::Newest:
+            return tr("Recently added");
+        case AlbumSort::Recent:
+            return tr("Recently played");
+        case AlbumSort::Frequent:
+            return tr("Most played");
+        case AlbumSort::Highest:
+            return tr("Top rated");
+        case AlbumSort::Starred:
+            return tr("Favourite");
+        default:
+            return {};
+    }
+}
+
+void SubsonicBrowser::clearFilter()
+{
+    m_filter->clear();
+    m_filterText.clear();
+    m_matchMode = MatchMode::Contains;
+
+    // Signals are blocked: the flags are set here, and one applyFilter() covers the rest.
+    for(const auto& [action, flag] : std::as_const(m_scopeActions)) {
+        const QSignalBlocker blocker{action};
+        action->setChecked(true);
+        *flag = true;
+    }
+    for(QAction* action : std::as_const(m_matchActions)) {
+        const QSignalBlocker blocker{action};
+        action->setChecked(action->data().toInt() == static_cast<int>(MatchMode::Contains));
+    }
+
+    applyFilter();
 }
 
 void SubsonicBrowser::updateDownloadedColumn()
@@ -1582,14 +1899,27 @@ void SubsonicBrowser::clearTree()
     ++m_treeGeneration;
     m_pendingLoads.clear();
     m_loading.clear();
+    m_albumListHeader = nullptr;
+    m_albumListMore   = nullptr;
+    m_albumListLoaded = 0;
+    m_playlistsHeader = nullptr;
     m_tree->clear();
 }
 
 void SubsonicBrowser::rebuildArtistTree()
 {
+    if(const QString type = serverAlbumType(m_albumSort); !type.isEmpty()) {
+        showServerAlbumList(type);
+        return;
+    }
+
     clearTree();
+    // Playlists always stay pinned at the top, above the (sortable) artist list.
     addPlaylistsHeader();
-    for(const QJsonObject& artist : m_artists) {
+
+    QList<QJsonObject> artists = m_artists;
+    sortArtists(artists, m_artistSort);
+    for(const QJsonObject& artist : artists) {
         auto* item = createArtistItem(artist);
         addPlaceholder(item);
     }
@@ -1626,16 +1956,19 @@ QTreeWidgetItem* SubsonicBrowser::createPlaylistItem(QTreeWidgetItem* parent, co
 
 void SubsonicBrowser::addPlaylistsHeader()
 {
-    if(m_playlists.isEmpty()) {
+    // Playlists and artists load in parallel: never add a second header if the other one won.
+    if(m_playlists.isEmpty() || m_playlistsHeader) {
         return;
     }
 
-    auto* header = createResultHeader(tr("Playlists (%1)").arg(m_playlists.size()));
-    m_tree->insertTopLevelItem(0, header);
-    for(const QJsonObject& playlist : m_playlists) {
-        createPlaylistItem(header, playlist);
+    m_playlistsHeader = createResultHeader(tr("Playlists (%1)").arg(m_playlists.size()));
+    m_tree->insertTopLevelItem(0, m_playlistsHeader);
+    QList<QJsonObject> playlists = m_playlists;
+    sortPlaylists(playlists, m_playlistSort);
+    for(const QJsonObject& playlist : playlists) {
+        createPlaylistItem(m_playlistsHeader, playlist);
     }
-    restoreExpansion(header);
+    restoreExpansion(m_playlistsHeader);
 }
 
 void SubsonicBrowser::startPlaylistScan()

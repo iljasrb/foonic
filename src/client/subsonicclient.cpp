@@ -158,25 +158,6 @@ void SubsonicClient::star(const QString& id, bool star)
     get(star ? u"star"_s : u"unstar"_s, query, [](const QJsonObject&, const QString&) {});
 }
 
-void SubsonicClient::setRating(const QString& id, int rating)
-{
-    if(!m_settings.isValid() || id.isEmpty()) {
-        return;
-    }
-    QUrlQuery query;
-    query.addQueryItem(u"id"_s, id);
-    query.addQueryItem(u"rating"_s, QString::number(std::clamp(rating, 0, 5)));
-    get(u"setRating"_s, query, [](const QJsonObject&, const QString&) {});
-}
-
-void SubsonicClient::getOpenSubsonicExtensions(ArrayCallback callback)
-{
-    get(u"getOpenSubsonicExtensions"_s, {}, [callback = std::move(callback)](const QJsonObject& response,
-                                                                             const QString& error) {
-        callback(error.isEmpty() ? asArray(response.value(u"openSubsonicExtensions"_s)) : QJsonArray{}, error);
-    });
-}
-
 void SubsonicClient::getStarred(ArrayCallback callback)
 {
     get(u"getStarred2"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
@@ -188,6 +169,21 @@ void SubsonicClient::getStarred(ArrayCallback callback)
     });
 }
 
+void SubsonicClient::getAlbumList2(const QString& type, ArrayCallback callback, int size, int offset)
+{
+    QUrlQuery query;
+    query.addQueryItem(u"type"_s, type);
+    query.addQueryItem(u"size"_s, QString::number(std::max(1, size)));
+    if(offset > 0) {
+        query.addQueryItem(u"offset"_s, QString::number(offset));
+    }
+    get(u"getAlbumList2"_s, query, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
+        callback(error.isEmpty() ? asArray(response.value(u"albumList2"_s).toObject().value(u"album"_s))
+                                 : QJsonArray{},
+                 error);
+    });
+}
+
 void SubsonicClient::getRandomSongs(ArrayCallback callback, int count)
 {
     QUrlQuery query;
@@ -195,75 +191,6 @@ void SubsonicClient::getRandomSongs(ArrayCallback callback, int count)
     get(u"getRandomSongs"_s, query, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
         callback(error.isEmpty() ? asArray(response.value(u"randomSongs"_s).toObject().value(u"song"_s)) : QJsonArray{},
                  error);
-    });
-}
-
-void SubsonicClient::getTopSongs(ArrayCallback callback, const QString& artist, int count)
-{
-    QUrlQuery query;
-    query.addQueryItem(u"artist"_s, artist);
-    query.addQueryItem(u"count"_s, QString::number(std::max(1, count)));
-    get(u"getTopSongs"_s, query, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
-        callback(error.isEmpty() ? asArray(response.value(u"topSongs"_s).toObject().value(u"song"_s)) : QJsonArray{},
-                 error);
-    });
-}
-
-void SubsonicClient::getSimilarSongs(ArrayCallback callback, const QString& id, int count)
-{
-    QUrlQuery query;
-    query.addQueryItem(u"id"_s, id);
-    query.addQueryItem(u"count"_s, QString::number(std::max(1, count)));
-    get(u"getSimilarSongs2"_s, query, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
-        callback(error.isEmpty() ? asArray(response.value(u"similarSongs2"_s).toObject().value(u"song"_s))
-                                 : QJsonArray{},
-                 error);
-    });
-}
-
-void SubsonicClient::getGenres(ArrayCallback callback)
-{
-    get(u"getGenres"_s, {}, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
-        callback(error.isEmpty() ? asArray(response.value(u"genres"_s).toObject().value(u"genre"_s)) : QJsonArray{},
-                 error);
-    });
-}
-
-void SubsonicClient::getSongsByGenre(ArrayCallback callback, const QString& genre, int count)
-{
-    QUrlQuery query;
-    query.addQueryItem(u"genre"_s, genre);
-    query.addQueryItem(u"count"_s, QString::number(std::max(1, count)));
-    get(u"getSongsByGenre"_s, query, [callback = std::move(callback)](const QJsonObject& response, const QString& error) {
-        callback(error.isEmpty() ? asArray(response.value(u"songsByGenre"_s).toObject().value(u"song"_s))
-                                 : QJsonArray{},
-                 error);
-    });
-}
-
-void SubsonicClient::getLyricsBySongId(std::function<void(const QString&, const QString&)> callback,
-                                       const QString& id)
-{
-    QUrlQuery query;
-    query.addQueryItem(u"id"_s, id);
-    get(u"getLyricsBySongId"_s, query, [callback = std::move(callback)](const QJsonObject& response,
-                                                                        const QString& error) {
-        if(!error.isEmpty()) {
-            callback({}, error);
-            return;
-        }
-        QStringList lines;
-        for(const QJsonValue& lyrics : asArray(response.value(u"lyricsList"_s).toObject().value(u"structuredLyrics"_s))) {
-            for(const QJsonValue& line : asArray(lyrics.toObject().value(u"line"_s))) {
-                if(const QString value = line.toObject().value(u"value"_s).toString(); !value.isEmpty()) {
-                    lines.push_back(value);
-                }
-            }
-            if(!lines.isEmpty()) {
-                break; // first available language
-            }
-        }
-        callback(lines.join(u'\n'), {});
     });
 }
 

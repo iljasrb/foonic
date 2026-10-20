@@ -50,21 +50,13 @@ public:
 
     //! Star/unstar a song, album or artist by id.
     void star(const QString& id, bool star);
-    //! Set a 0-5 star rating for @p id (0 clears it).
-    void setRating(const QString& id, int rating);
 
-    //! OpenSubsonic extension names advertised by the server (empty on old servers).
-    void getOpenSubsonicExtensions(ArrayCallback callback);
     //! Starred songs across artists/albums/songs.
     void getStarred(ArrayCallback callback);
+    /*! Album list: type = newest, recent, frequent, starred, highest, random,
+     *  alphabeticalByName, alphabeticalByArtist, byYear, byGenre. */
+    void getAlbumList2(const QString& type, ArrayCallback callback, int size = 100, int offset = 0);
     void getRandomSongs(ArrayCallback callback, int count = 50);
-    void getTopSongs(ArrayCallback callback, const QString& artist, int count = 50);
-    void getSimilarSongs(ArrayCallback callback, const QString& id, int count = 50);
-    void getGenres(ArrayCallback callback);
-    void getSongsByGenre(ArrayCallback callback, const QString& genre, int count = 100);
-    //! Synced/plain lyrics by song id (OpenSubsonic `songLyrics`).
-    void getLyricsBySongId(std::function<void(const QString& lyrics, const QString& error)> callback,
-                           const QString& id);
 
     void createPlaylist(const QString& name, const QStringList& songIds,
                         std::function<void(bool ok, const QString& error)> callback);

@@ -97,6 +97,9 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/SeekFadeMs"), 200);
     settings->createSetting(QStringLiteral("Subsonic/CoverArtSize"), 300);
     settings->createSetting(QStringLiteral("Subsonic/ScrobblePlays"), true);
+    settings->createSetting(QStringLiteral("Subsonic/ArtistSort"), 0);
+    settings->createSetting(QStringLiteral("Subsonic/AlbumSort"), 0);
+    settings->createSetting(QStringLiteral("Subsonic/PlaylistSort"), 0);
 }
 
 inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)

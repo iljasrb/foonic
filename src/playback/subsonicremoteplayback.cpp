@@ -128,6 +128,7 @@ struct StreamState
 
         if(!chunk.isEmpty() && space > 0) {
             buffer.append(chunk.left(space));
+            attempts = 0; // data is flowing again, so the next drop gets a fresh retry budget
         }
     }
 
@@ -628,7 +629,8 @@ private:
                                 ++state->attempts;
                                 qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "failed:"
                                                   << reply->errorString() << "retry" << state->attempts;
-                                retryFrom              = state->bufferBase + state->buffer.size();
+                                retryFrom               = state->bufferBase + state->buffer.size();
+                                state->error.clear(); // the retry replaces the failed transfer
                                 state->headersProcessed = false;
                                 state->requestedStart   = retryFrom;
                                 state->reply.clear();
@@ -654,14 +656,10 @@ private:
 
             QObject::connect(reply, &QNetworkReply::errorOccurred, reply, [state, reply, id, requestNo](
                                                                                QNetworkReply::NetworkError error) {
+                // Only logged: latching the error here made the retry path below unreachable, because the
+                // decoder thread woke on the non-empty error and failed the track before `finished` ran.
                 qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "error" << static_cast<int>(error)
                                   << reply->errorString();
-                {
-                    const std::scoped_lock lock{state->mutex};
-                    if(reply == state->reply && !state->aborted && state->error.isEmpty()) {
-                        state->error = reply->errorString();
-                    }
-                }
                 state->ready.notify_all();
             });
         });

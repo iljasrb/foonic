@@ -12,6 +12,12 @@
 
 #include <QPointer>
 
+// fooyin 0.14 renamed the plugin IID; follow whatever the headers declare so the plugin
+// stays loadable across versions.
+#ifndef FOOYIN_PLUGIN_IID
+#define FOOYIN_PLUGIN_IID "org.fooyin.fooyin.plugin/1.0"
+#endif
+
 namespace Fooyin {
 class ActionManager;
 class NetworkAccessManager;
@@ -29,7 +35,7 @@ class SubsonicPlugin : public QObject,
                        public GuiPlugin
 {
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID "org.fooyin.fooyin.plugin/1.0" FILE "foonic.json")
+    Q_PLUGIN_METADATA(IID FOOYIN_PLUGIN_IID FILE "foonic.json")
     Q_INTERFACES(Fooyin::Plugin Fooyin::CorePlugin Fooyin::GuiPlugin)
 
 public:

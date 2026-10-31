@@ -6,6 +6,7 @@
 
 #include "subsonicremoteplayback.h"
 
+#include "subsonicbufferbar.h"
 #include "subsonicsettings.h"
 #include "subsonicstreamutils.h"
 
@@ -20,6 +21,8 @@
 
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QIODevice>
 #include <QMetaObject>
 #include <QNetworkAccessManager>
@@ -93,6 +96,11 @@ struct StreamState
     std::stop_token token;
     std::mutex mutex;
     std::condition_variable_any ready;
+    // Seekbar publish throttle/dedupe. Guarded by `mutex` so the decoder and network threads can both
+    // publish as the transfer grows.
+    qint64 lastPublishMs{-1000};
+    double lastPublishStart{-1.0};
+    double lastPublishEnd{-1.0};
 
     [[nodiscard]] bool canSeek() const
     {
@@ -184,12 +192,14 @@ class SubsonicStreamDevice : public QIODevice, public RemoteStreamDevice
 {
 public:
     SubsonicStreamDevice(std::shared_ptr<NetworkAccessManager> network, QUrl url, bool ignoreSslErrors,
-                         qsizetype bufferBytes, QObject* parent = nullptr)
+                         qsizetype bufferBytes, std::shared_ptr<SubsonicBufferMonitor> monitor,
+                         QObject* parent = nullptr)
         : QIODevice{parent}
         , m_network{std::move(network)}
         , m_url{std::move(url)}
         , m_ignoreSslErrors{ignoreSslErrors}
         , m_bufferBytes{bufferBytes}
+        , m_monitor{std::move(monitor)}
         , m_state{std::make_shared<StreamState>()}
     {
         m_state->maxBytes = bufferBytes;
@@ -339,6 +349,7 @@ public:
             close();
             return false;
         }
+        publishBuffer(true);
         return true;
     }
 
@@ -468,6 +479,7 @@ public:
 
         // Don't start the request here: FFmpeg may issue several seeks before reading, and the backward
         // margin above collapses its backwards probes into memory. The request starts on the next read.
+        publishBuffer(true);
         return QIODevice::seek(pos);
     }
 
@@ -563,6 +575,8 @@ protected:
         const QPointer<QNetworkReply> reply = m_state->reply;
         lock.unlock();
 
+        publishBuffer();
+
         // Pull data QNAM buffered but hasn't signalled yet.
         if(reply) {
             QMetaObject::invokeMethod(
@@ -591,6 +605,46 @@ protected:
     }
 
 private:
+    //! Publishes the downloaded range to the seekbar overlay. Bytes are used as fractions of the track;
+    //! for VBR streams that is an approximation, but it is the only progress the device has.
+    void publishBuffer(bool force = false)
+    {
+        if(!m_monitor) {
+            return;
+        }
+
+        double start{0.0};
+        double last{0.0};
+        {
+            const std::scoped_lock lock{m_state->mutex};
+            const qint64 total = m_state->total;
+            const qint64 base  = m_state->bufferBase;
+            const qint64 end   = base + m_state->buffer.size();
+            if(total <= 0 || end <= base) {
+                return;
+            }
+
+            const qint64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count();
+            start = std::clamp(static_cast<double>(base) / static_cast<double>(total), 0.0, 1.0);
+            last  = std::clamp(static_cast<double>(end) / static_cast<double>(total), 0.0, 1.0);
+
+            const bool changed = !qFuzzyCompare(start, m_state->lastPublishStart)
+                              || !qFuzzyCompare(last, m_state->lastPublishEnd);
+            if(!force && (!changed || now - m_state->lastPublishMs < 100)) {
+                return;
+            }
+            m_state->lastPublishMs    = now;
+            m_state->lastPublishStart = start;
+            m_state->lastPublishEnd   = last;
+        }
+
+        const auto monitor = m_monitor;
+        QMetaObject::invokeMethod(
+            monitor.get(), [monitor, start, last] { monitor->setRange(start, last); }, Qt::QueuedConnection);
+    }
+
     //! One line per second while streaming: shows whether decoding continues (e.g. while paused).
     void logReadRate(qsizetype count)
     {
@@ -652,7 +706,7 @@ private:
                 state->reply = reply;
             }
 
-            QObject::connect(reply, &QIODevice::readyRead, reply, [state, reply] {
+            QObject::connect(reply, &QIODevice::readyRead, reply, [device, state, reply] {
                 {
                     const std::scoped_lock lock{state->mutex};
                     if(reply == state->reply && !state->aborted) {
@@ -661,6 +715,9 @@ private:
                     }
                 }
                 state->ready.notify_all();
+                if(device) {
+                    device->publishBuffer();
+                }
             });
 
             QObject::connect(reply, &QNetworkReply::metaDataChanged, reply, [state, reply] {
@@ -705,6 +762,9 @@ private:
                     }
                 }
                 state->ready.notify_all();
+                if(device) {
+                    device->publishBuffer();
+                }
                 reply->deleteLater();
                 if(retryFrom >= 0 && device) {
                     device->scheduleRetry(retryFrom);
@@ -726,6 +786,7 @@ private:
     QUrl m_url;
     bool m_ignoreSslErrors;
     qsizetype m_bufferBytes{DefaultBufferBytes};
+    std::shared_ptr<SubsonicBufferMonitor> m_monitor;
     std::shared_ptr<StreamState> m_state;
     int m_id{nextDeviceId()};
     std::atomic<int> m_requests{0}; // touched from both the decoder and the network thread
@@ -739,10 +800,12 @@ class SubsonicRemoteSourceProvider : public RemoteSourceProvider
 {
 public:
     SubsonicRemoteSourceProvider(std::shared_ptr<NetworkAccessManager> network,
-                                 std::shared_ptr<RemoteIoService> fallback, SettingsManager* settings)
+                                 std::shared_ptr<RemoteIoService> fallback, SettingsManager* settings,
+                                 std::shared_ptr<SubsonicBufferMonitor> monitor)
         : m_network{std::move(network)}
         , m_fallback{std::move(fallback)}
         , m_settings{settings}
+        , m_monitor{std::move(monitor)}
     { }
 
     [[nodiscard]] RemoteStreamSource createStreamSource(const QUrl& url) const override
@@ -751,13 +814,32 @@ public:
             return m_fallback->createStreamSource(url);
         }
 
+        // A fully prefetched next track is served from disk, so it starts without buffering.
+        if(const QString songId = QUrlQuery{url}.queryItemValue(u"id"_s); !songId.isEmpty()) {
+            const QString localPath = prefetchPath(songId);
+            if(QFileInfo::exists(localPath)) {
+                auto file = std::make_unique<QFile>(localPath);
+                if(file->open(QIODevice::ReadOnly)) {
+                    if(m_monitor) {
+                        const auto monitor = m_monitor;
+                        QMetaObject::invokeMethod(
+                            monitor.get(), [monitor] { monitor->setRange(0.0, 1.0); }, Qt::QueuedConnection);
+                    }
+                    RemoteStreamSource source;
+                    source.device      = std::move(file);
+                    source.openTimeout = std::chrono::milliseconds{0};
+                    return source;
+                }
+            }
+        }
+
         const bool ignoreSsl
             = m_settings && m_settings->value(QStringLiteral("Subsonic/IgnoreSslErrors")).toBool();
         const SubsonicSettings settings = loadSubsonicSettings(m_settings);
         const qsizetype bufferBytes = static_cast<qsizetype>(settings.streamBufferMb) * 1024 * 1024;
 
         RemoteStreamSource source;
-        auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, bufferBytes);
+        auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, bufferBytes, m_monitor);
         source.remoteDevice = device.get();
         source.device       = std::move(device);
         source.openTimeout  = std::chrono::milliseconds{8000};
@@ -768,6 +850,7 @@ private:
     std::shared_ptr<NetworkAccessManager> m_network;
     std::shared_ptr<RemoteIoService> m_fallback;
     SettingsManager* m_settings;
+    std::shared_ptr<SubsonicBufferMonitor> m_monitor;
 };
 
 class SubsonicDecoder : public AudioDecoder
@@ -834,8 +917,7 @@ public:
                           << m_inner->isSeekable() << "concurrent" << m_inner->allowsConcurrentDecoding()
                           << "prebufferMs" << m_inner->playbackPrebufferMs();
 
-        const auto* device = dynamic_cast<SubsonicStreamDevice*>(source.device);
-        m_seekable         = m_inner->isSeekable() && device && device->canSeek();
+        m_seekable = m_inner->isSeekable() && source.device && !source.device->isSequential();
         return format;
     }
 
@@ -935,16 +1017,18 @@ private:
 };
 } // namespace
 
-void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
-                                    std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings)
+std::shared_ptr<SubsonicBufferMonitor> registerSubsonicRemotePlayback(
+    const std::shared_ptr<AudioLoader>& loader, std::shared_ptr<NetworkAccessManager> network,
+    SettingsManager* settings)
 {
+    auto monitor = std::make_shared<SubsonicBufferMonitor>();
     if(!loader || !network) {
-        return;
+        return monitor;
     }
 
     auto fallback = std::make_shared<RemoteIoService>(network, settings);
-    loader->setRemoteSourceProvider(
-        std::make_shared<SubsonicRemoteSourceProvider>(network, std::move(fallback), settings));
+    loader->setRemoteSourceProvider(std::make_shared<SubsonicRemoteSourceProvider>(network, std::move(fallback),
+                                                                                   settings, monitor));
 
     DecoderCreator ffmpeg;
     for(const auto& entry : loader->decoders()) {
@@ -955,7 +1039,7 @@ void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
     }
     if(!ffmpeg) {
         qCWarning(SUBSONIC) << "FFmpeg decoder not found; Subsonic remote seeking is unavailable";
-        return;
+        return monitor;
     }
 
     loader->addDecoder(u"Foonic Remote"_s, [ffmpeg] { return std::make_unique<SubsonicDecoder>(ffmpeg); }, 0);
@@ -963,5 +1047,6 @@ void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
     // fooyin restores the decoder order from saved settings after plugins initialise, which can
     // shuffle us behind FFmpeg. Put ourselves back in front once the event loop is running.
     QTimer::singleShot(0, [loader] { loader->changeDecoderIndex(u"Foonic Remote"_s, 0); });
+    return monitor;
 }
 } // namespace Fooyin::Subsonic

@@ -15,6 +15,7 @@ Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 | Track metadata + cover art in the browser | Implemented |
 | Remote streams are seekable + pausable (HTTP Range) | Implemented |
 | Seek fade (fade out/in) around remote seeks | Implemented |
+| Next-track prefetch once the current track is fully buffered | Implemented |
 | Transcoding (stream format + max bitrate) | Unverified |
 | Download to Library (tagged files added to the fooyin library) | Implemented |
 | Scrobbling (now playing + play counts) | Implemented |

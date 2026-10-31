@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 
+class QNetworkReply;
 class QTimer;
 
 namespace Fooyin {
@@ -22,6 +23,7 @@ class SettingsManager;
 class Track;
 
 namespace Subsonic {
+class SubsonicBufferMonitor;
 class SubsonicClient;
 
 /*!
@@ -34,7 +36,8 @@ class SubsonicPlaybackController : public QObject
 
 public:
     SubsonicPlaybackController(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
-                               PlayerController* player, QObject* parent = nullptr);
+                               PlayerController* player, std::shared_ptr<SubsonicBufferMonitor> bufferMonitor,
+                               QObject* parent = nullptr);
     ~SubsonicPlaybackController() override;
 
 private:
@@ -42,11 +45,15 @@ private:
     void startScrobble(const Track& track);
     void maybeScrobble(uint64_t positionMs);
     [[nodiscard]] QString songIdForTrack(const Track& track) const;
+    void tryPrefetch();
+    void startPrefetch(const QString& songId);
+    void cancelPrefetch();
 
     std::shared_ptr<NetworkAccessManager> m_network;
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     PlayerController* m_player;
+    std::shared_ptr<SubsonicBufferMonitor> m_bufferMonitor;
 
     // fooyin's seek/manual crossfade is gated on Engine/Crossfading (off by default); enable it for
     // remote Subsonic playback and restore the user's values afterwards.
@@ -58,6 +65,11 @@ private:
     QString m_scrobbleId;
     uint64_t m_scrobbleAt{0};
     bool m_scrobbled{false};
+
+    // Next track pre-downloaded to disk once the current one is fully buffered.
+    QNetworkReply* m_prefetchReply{nullptr};
+    QString m_pendingPrefetchId;
+    QString m_prefetchId;
 };
 } // namespace Subsonic
 } // namespace Fooyin

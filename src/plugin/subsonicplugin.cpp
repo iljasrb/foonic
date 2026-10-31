@@ -7,6 +7,7 @@
 #include "subsonicplugin.h"
 
 #include "subsonicbrowserwidget.h"
+#include "subsonicbufferbar.h"
 #include "subsonicdialog.h"
 #include "subsoniclibrarydownloader.h"
 #include "subsonicplaybackcontroller.h"
@@ -41,9 +42,9 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
 
     // Subsonic streams are plain http(s), which fooyin hard-codes as non-seekable. Install a seekable
     // HTTP-Range device and a decoder that keeps using fooyin's FFmpeg backend through it.
-    registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings);
+    m_bufferMonitor = registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings);
 
-    new SubsonicPlaybackController{m_network, m_settings, context.playerController, this};
+    new SubsonicPlaybackController{m_network, m_settings, context.playerController, m_bufferMonitor, this};
 
     m_libraryDownloads = new SubsonicLibraryDownloader{m_network, m_settings, context.audioLoader,
                                                        context.library, this};
@@ -67,6 +68,10 @@ void SubsonicPlugin::initialise(const GuiPluginContext& context)
     m_widgetProvider = context.widgetProvider;
 
     new SubsonicSettingsPage{m_network, m_settings, this};
+
+    if(m_bufferMonitor) {
+        new SubsonicBufferBar{m_bufferMonitor.get(), this};
+    }
 
     m_widgetProvider->registerWidget(
         u"SubsonicBrowser"_s,

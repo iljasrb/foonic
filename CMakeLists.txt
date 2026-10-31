@@ -16,6 +16,8 @@ create_fooyin_plugin(
             src/client/subsonicclient.h
             src/playback/subsonicplaybackcontroller.cpp
             src/playback/subsonicplaybackcontroller.h
+            src/playback/subsonicbufferbar.cpp
+            src/playback/subsonicbufferbar.h
             src/playback/subsonicremoteplayback.cpp
             src/playback/subsonicremoteplayback.h
             src/playback/subsonicstreamutils.h

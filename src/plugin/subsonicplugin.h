@@ -12,6 +12,8 @@
 
 #include <QPointer>
 
+#include <memory>
+
 // fooyin 0.14 renamed the plugin IID; follow whatever the headers declare so the plugin
 // stays loadable across versions.
 #ifndef FOOYIN_PLUGIN_IID
@@ -26,6 +28,7 @@ class SettingsManager;
 class WidgetProvider;
 
 namespace Subsonic {
+class SubsonicBufferMonitor;
 class SubsonicDialog;
 class SubsonicLibraryDownloader;
 
@@ -51,6 +54,7 @@ private:
     ActionManager* m_actionManager{nullptr};
     WidgetProvider* m_widgetProvider{nullptr};
     SubsonicLibraryDownloader* m_libraryDownloads{nullptr};
+    std::shared_ptr<SubsonicBufferMonitor> m_bufferMonitor;
     QPointer<SubsonicDialog> m_dialog;
 };
 } // namespace Subsonic

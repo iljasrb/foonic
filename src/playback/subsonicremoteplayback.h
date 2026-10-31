@@ -14,6 +14,8 @@ class NetworkAccessManager;
 class SettingsManager;
 
 namespace Subsonic {
+class SubsonicBufferMonitor;
+
 /*!
  * Makes Subsonic HTTP streams seekable/pausable.
  *
@@ -21,8 +23,11 @@ namespace Subsonic {
  * sequential. This installs a seekable HTTP-Range device through a custom RemoteSourceProvider and
  * registers a decoder that wraps fooyin's own FFmpeg decoder, handing it that device plus a
  * non-remote track copy so the "remote => not seekable" rule is not applied.
+ *
+ * Returns the monitor that devices publish their downloaded range to.
  */
-void registerSubsonicRemotePlayback(const std::shared_ptr<AudioLoader>& loader,
-                                    std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings);
+std::shared_ptr<SubsonicBufferMonitor> registerSubsonicRemotePlayback(
+    const std::shared_ptr<AudioLoader>& loader, std::shared_ptr<NetworkAccessManager> network,
+    SettingsManager* settings);
 } // namespace Subsonic
 } // namespace Fooyin

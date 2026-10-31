@@ -10,6 +10,7 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QUrl>
 #include <QUrlQuery>
@@ -64,6 +65,9 @@ public:
                         std::function<void(bool ok, const QString& error)> callback);
     void addToPlaylist(const QString& id, const QStringList& songIds,
                        std::function<void(bool ok, const QString& error)> callback);
+    //! Remove entries by position (as returned by getPlaylist). Indexes are applied highest-first.
+    void removeFromPlaylist(const QString& id, QList<int> indexes,
+                            std::function<void(bool ok, const QString& error)> callback);
     void deletePlaylist(const QString& id, std::function<void(bool ok, const QString& error)> callback);
 
     [[nodiscard]] QUrl streamUrl(const QString& id) const;

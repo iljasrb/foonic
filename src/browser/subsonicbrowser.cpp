@@ -1338,10 +1338,16 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     QAction* downloadAction = menu.addAction(tr("Download to Library"));
     QAction* starAction{nullptr};
     QAction* unstarAction{nullptr};
+    QAction* removeFromPlaylistAction{nullptr};
     if(item->data(0, KindRole).toInt() == Song) {
         menu.addSeparator();
         starAction   = menu.addAction(tr("Star"));
         unstarAction = menu.addAction(tr("Unstar"));
+        // Only a song shown directly under a server playlist can be removed from it.
+        if(auto* parent = item->parent();
+           parent && parent->data(0, KindRole).toInt() == PlaylistNode) {
+            removeFromPlaylistAction = menu.addAction(tr("Remove from Server Playlist"));
+        }
     }
 
     QStringList songIds;
@@ -1424,6 +1430,9 @@ void SubsonicBrowser::showContextMenu(const QPoint& pos)
     }
     else if(deletePlaylistAction && chosen == deletePlaylistAction) {
         deleteSelectedPlaylist(item);
+    }
+    else if(removeFromPlaylistAction && chosen == removeFromPlaylistAction) {
+        removeSongsFromPlaylist(item);
     }
     else if(chosen == downloadAction) {
         playSelection(BrowserAction::Download);
@@ -1629,6 +1638,41 @@ void SubsonicBrowser::deleteSelectedPlaylist(QTreeWidgetItem* item)
             refresh();
         }
     });
+}
+
+void SubsonicBrowser::removeSongsFromPlaylist(QTreeWidgetItem* item)
+{
+    auto* playlist = item ? item->parent() : nullptr;
+    if(!playlist || playlist->data(0, KindRole).toInt() != PlaylistNode) {
+        return;
+    }
+
+    QList<int> indexes;
+    for(QTreeWidgetItem* selected : m_tree->selectedItems()) {
+        if(selected->parent() == playlist) {
+            indexes.push_back(playlist->indexOfChild(selected));
+        }
+    }
+    if(indexes.isEmpty()) {
+        indexes.push_back(playlist->indexOfChild(item));
+    }
+
+    const auto answer = QMessageBox::question(
+        this, tr("Foonic"),
+        tr("Remove %n song(s) from playlist \"%1\"?", "", indexes.size()).arg(playlist->text(0)),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if(answer != QMessageBox::Yes) {
+        return;
+    }
+
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    m_client->removeFromPlaylist(playlist->data(0, IdRole).toString(), indexes,
+                                 [this](bool ok, const QString& error) {
+                                     setStatus(ok ? tr("Removed from playlist.") : error);
+                                     if(ok) {
+                                         refresh();
+                                     }
+                                 });
 }
 
 void SubsonicBrowser::showHeaderMenu(const QPoint& pos)

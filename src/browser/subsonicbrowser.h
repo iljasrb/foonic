@@ -129,6 +129,7 @@ private:
     void addSongsToServerPlaylist(const QString& id, const QStringList& songIds);
     void renameSelectedPlaylist(QTreeWidgetItem* item);
     void deleteSelectedPlaylist(QTreeWidgetItem* item);
+    void removeSongsFromPlaylist(QTreeWidgetItem* item);
     void playSelection(BrowserAction action);
 
     void loadChildren(QTreeWidgetItem* item, int kind, const QString& id, std::function<void()> onDone = {},

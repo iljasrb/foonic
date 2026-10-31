@@ -235,6 +235,27 @@ void SubsonicClient::addToPlaylist(const QString& id, const QStringList& songIds
     });
 }
 
+void SubsonicClient::removeFromPlaylist(const QString& id, QList<int> indexes,
+                                        std::function<void(bool, const QString&)> callback)
+{
+    if(id.isEmpty() || indexes.isEmpty()) {
+        callback(false, tr("Nothing to remove."));
+        return;
+    }
+
+    // Highest first: servers that remove one by one then never shift the indexes still to be removed.
+    std::sort(indexes.begin(), indexes.end(), std::greater<>());
+
+    QUrlQuery query;
+    query.addQueryItem(u"playlistId"_s, id);
+    for(const int index : indexes) {
+        query.addQueryItem(u"songIndexToRemove"_s, QString::number(index));
+    }
+    get(u"updatePlaylist"_s, query, [callback = std::move(callback)](const QJsonObject&, const QString& error) {
+        callback(error.isEmpty(), error);
+    });
+}
+
 void SubsonicClient::deletePlaylist(const QString& id, std::function<void(bool, const QString&)> callback)
 {
     QUrlQuery query;

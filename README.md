@@ -9,7 +9,7 @@ Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
 |---|---|
 | Library browser (**View → Foonic Browser**) and layout widget (Internet category) | Implemented |
 | Drag-and-drop / menu add to a fooyin playlist, Play Next, Add to Queue | Implemented |
-| Subsonic playlists, and server playlist editing (create / add / rename / delete) | Implemented |
+| Subsonic playlists, and server playlist editing (create / add / remove / rename / delete) | Implemented |
 | Library search and playlist search | Implemented |
 | Server setup; settings persist across restarts | Implemented |
 | Track metadata + cover art in the browser | Implemented |
@@ -59,7 +59,8 @@ Drag a selection onto a playlist,
 right-click for Play / Add to Playlist / Play Next / Add to Queue / Download to Library / Star /
 Unstar, or double-click a song to play it. Right-click empty space for **Random songs** and
 **Starred songs**, right-click songs to add them to a **server playlist** (or create one), and
-right-click a playlist to rename or delete it. **Refresh** reloads the list.
+right-click a playlist to rename or delete it. Right-click a song inside an expanded playlist to
+remove it from that playlist. **Refresh** reloads the list.
 
 **Download to Library** works on any selection (a song, album, artist, playlist or several of them),
 saves each track into the library folder below, writes its tags and cover art, and adds it to the

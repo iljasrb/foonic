@@ -37,12 +37,6 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
     m_network  = context.networkAccess;
     m_settings = context.settingsManager;
 
-    // Debug aid: stamp every log line with wall clock, process uptime and thread so stalls can be timed
-    // against the engine output. Respects an explicit QT_MESSAGE_PATTERN.
-    if(qEnvironmentVariableIsEmpty("QT_MESSAGE_PATTERN")) {
-        qSetMessagePattern(u"[%{time hh:mm:ss.zzz} +%{time process}ms] [%{threadid}] %{category}: %{message}"_s);
-    }
-
     registerSubsonicSettings(m_settings);
 
     // Subsonic streams are plain http(s), which fooyin hard-codes as non-seekable. Install a seekable

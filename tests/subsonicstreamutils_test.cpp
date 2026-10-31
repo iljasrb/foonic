@@ -41,12 +41,6 @@ int main()
     assert(malformed.start == -1);
     assert(malformed.total == -1);
 
-    assert(imageMimeType(QByteArrayLiteral("\xFF\xD8\xFF\x00"), {}) == QStringLiteral("image/jpeg"));
-    assert(imageMimeType(QByteArrayLiteral("\x89PNG\r\n\x1a\n"), {}) == QStringLiteral("image/png"));
-    assert(imageMimeType(QByteArrayLiteral("{\"error\":1}"), QStringLiteral("application/json")).isEmpty());
-    assert(imageMimeType(QByteArrayLiteral("\xFF\xD8\xFF"), QStringLiteral("image/jpeg"))
-           == QStringLiteral("image/jpeg"));
-
     std::cout << "subsonicstreamutils: ok\n";
     return 0;
 }

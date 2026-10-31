@@ -32,11 +32,14 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPixmap>
+#include <QPixmapCache>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalBlocker>
@@ -687,7 +690,6 @@ SubsonicBrowser::SubsonicBrowser(std::shared_ptr<NetworkAccessManager> network, 
     if(auto* controller = m_settings->settingsDialog()) {
         connect(controller, &SettingsDialogController::closing, this, [this] {
             m_client->setSettings(loadSubsonicSettings(m_settings));
-            m_coverCache.clear();
             m_coverRequests.clear();
             refresh();
         });
@@ -1168,7 +1170,7 @@ QTreeWidgetItem* SubsonicBrowser::createSongItem(QTreeWidgetItem* parent, const 
 
     const qint64 size = songSize(song);
     if(size > 0) {
-        child->setText(4, formatBytes(size));
+        child->setText(4, QLocale{}.formattedDataSize(size));
     }
 
     child->setData(0, KindRole, Song);
@@ -1255,7 +1257,8 @@ void SubsonicBrowser::finishGather(const std::shared_ptr<GatherState>& state)
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     m_client->setSettings(settings);
 
-    qCInfo(SUBSONIC) << "Adding" << state->songs.size() << "track(s), total" << formatBytes(state->bytes);
+    qCInfo(SUBSONIC) << "Adding" << state->songs.size() << "track(s), total"
+                     << QLocale{}.formattedDataSize(state->bytes);
 
     TrackList tracks;
     tracks.reserve(state->songs.size());
@@ -1310,8 +1313,8 @@ void SubsonicBrowser::applyAction(const TrackList& tracks, BrowserAction action,
             }
             setStatus(tr("Queued %1 track(s).").arg(tracks.size()));
             break;
-        case BrowserAction::Download:
-            break; // handled in finishGather() before tracks are built
+        default:
+            break; // Download is handled in finishGather() before tracks are built
     }
 }
 
@@ -1817,8 +1820,9 @@ void SubsonicBrowser::applyCover(QTreeWidgetItem* item, const QString& coverArtI
         return;
     }
 
-    if(const auto cached = m_coverCache.constFind(coverArtId); cached != m_coverCache.constEnd()) {
-        item->setIcon(0, QIcon{cached.value()});
+    QPixmap cached;
+    if(QPixmapCache::find(u"foonic-cover:"_s + coverArtId, &cached)) {
+        item->setIcon(0, QIcon{cached});
         return;
     }
 
@@ -1834,7 +1838,7 @@ void SubsonicBrowser::requestCover(const QString& coverArtId)
     // Disk cache first, so a restart doesn't re-fetch every cover.
     QPixmap pixmap;
     if(pixmap.load(coverCachePath(coverArtId))) {
-        m_coverCache.insert(coverArtId, pixmap);
+        QPixmapCache::insert(u"foonic-cover:"_s + coverArtId, pixmap);
         applyCoverToTree(coverArtId);
         return;
     }
@@ -1849,13 +1853,9 @@ void SubsonicBrowser::requestCover(const QString& coverArtId)
             QPixmap downloaded;
             if(downloaded.loadFromData(reply->readAll())) {
                 downloaded = downloaded.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-                m_coverCache.insert(coverArtId, downloaded);
+                QPixmapCache::insert(u"foonic-cover:"_s + coverArtId, downloaded);
                 downloaded.save(coverCachePath(coverArtId), "JPG");
                 applyCoverToTree(coverArtId);
-                // Bound memory; visible rows keep their already-set icons.
-                if(m_coverCache.size() > 1024) {
-                    m_coverCache.clear();
-                }
                 return;
             }
         }
@@ -1867,12 +1867,12 @@ void SubsonicBrowser::requestCover(const QString& coverArtId)
 
 void SubsonicBrowser::applyCoverToTree(const QString& coverArtId)
 {
-    const auto cached = m_coverCache.constFind(coverArtId);
-    if(cached == m_coverCache.constEnd()) {
+    QPixmap cached;
+    if(!QPixmapCache::find(u"foonic-cover:"_s + coverArtId, &cached)) {
         return;
     }
 
-    const QIcon icon{cached.value()};
+    const QIcon icon{cached};
     QTreeWidgetItemIterator it{m_tree};
     while(*it) {
         QTreeWidgetItem* item = *it;

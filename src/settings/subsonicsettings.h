@@ -11,7 +11,6 @@
 #include <QLoggingCategory>
 #include <QStandardPaths>
 #include <QString>
-#include <QStringList>
 
 #include <algorithm>
 
@@ -19,24 +18,6 @@ Q_DECLARE_LOGGING_CATEGORY(SUBSONIC)
 
 namespace Fooyin::Subsonic {
 constexpr auto SettingsPageId = "Fooyin.Subsonic.Settings";
-
-inline QString formatBytes(qint64 bytes)
-{
-    if(bytes <= 0) {
-        return {};
-    }
-
-    static const QStringList Units{QStringLiteral("B"), QStringLiteral("kB"), QStringLiteral("MB"),
-                                   QStringLiteral("GB"), QStringLiteral("TB")};
-    double value = static_cast<double>(bytes);
-    int unit{0};
-    while(value >= 1024.0 && unit < Units.size() - 1) {
-        value /= 1024.0;
-        ++unit;
-    }
-
-    return QStringLiteral("%1 %2").arg(value, 0, 'f', unit == 0 ? 0 : 2).arg(Units.at(unit));
-}
 
 struct SubsonicSettings
 {

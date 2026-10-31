@@ -43,6 +43,7 @@ public:
 
 private:
     [[nodiscard]] SubsonicSettings uiSettings() const;
+    void load(const SubsonicSettings& settings);
     void testConnection();
     void loadMusicFolders();
     void browseLibraryDir();
@@ -230,8 +231,11 @@ SubsonicSettings SubsonicSettingsPageWidget::uiSettings() const
 
 void SubsonicSettingsPageWidget::load()
 {
-    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    load(loadSubsonicSettings(m_settings));
+}
 
+void SubsonicSettingsPageWidget::load(const SubsonicSettings& settings)
+{
     m_server->setText(settings.server);
     m_username->setText(settings.username);
     m_password->setText(settings.password);
@@ -272,12 +276,7 @@ void SubsonicSettingsPageWidget::load()
 
 void SubsonicSettingsPageWidget::apply()
 {
-    SubsonicSettings settings;
-    settings.server       = m_server->text().trimmed();
-    settings.username     = m_username->text().trimmed();
-    settings.password     = m_password->text();
-    settings.authMode     = m_authMode->currentData().toString();
-    settings.apiKey       = m_apiKey->text().trimmed();
+    SubsonicSettings settings = uiSettings();
     settings.format       = m_format->currentData().toString();
     settings.maxBitRate   = (settings.format == "raw"_L1) ? 0 : m_maxBitRate->value();
     settings.libraryDir   = m_libraryDir->text().trimmed();
@@ -288,8 +287,6 @@ void SubsonicSettingsPageWidget::apply()
     settings.coverArtSize           = m_coverArtSize->value();
     settings.scrobblePlays          = m_scrobble->isChecked();
     m_settings->set(QStringLiteral("Engine/RemotePrebufferMs"), settings.remotePrebufferMs);
-    settings.ignoreSslErrors        = m_ignoreSsl->isChecked();
-    settings.musicFolderId          = m_musicFolder->currentData().toString();
 
     saveSubsonicSettings(m_settings, settings);
     // Persist immediately so the choice survives an unclean exit (the core only flushes every 5 minutes).
@@ -301,25 +298,9 @@ void SubsonicSettingsPageWidget::apply()
 
 void SubsonicSettingsPageWidget::reset()
 {
-    m_server->clear();
-    m_username->clear();
-    m_password->clear();
-    m_apiKey->clear();
-    m_authMode->setCurrentIndex(0);
-    m_ignoreSsl->setChecked(false);
-    m_musicFolder->clear();
-    m_musicFolder->addItem(tr("All folders"), QString{});
-    m_format->setCurrentIndex(0);
-    m_maxBitRate->setValue(0);
-    m_libraryDir->setText(defaultLibraryDir());
-    m_streamBuffer->setValue(64);
-    m_remotePrebuffer->setValue(400);
-    m_seekFade->setChecked(true);
-    m_seekFadeMs->setValue(200);
-    m_coverArtSize->setValue(300);
-    m_scrobble->setChecked(true);
-    setTestStatus({});
-    updateBitRateState();
+    SubsonicSettings defaults;
+    defaults.libraryDir = defaultLibraryDir();
+    load(defaults);
 }
 
 void SubsonicSettingsPageWidget::setTestStatus(const QString& text, const QString& color)

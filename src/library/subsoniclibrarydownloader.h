@@ -52,8 +52,6 @@ public:
     [[nodiscard]] QString existingLocalPath(const QJsonObject& song) const;
 
     [[nodiscard]] bool isActive() const;
-    [[nodiscard]] int total() const;
-    [[nodiscard]] int completed() const;
 
 Q_SIGNALS:
     void progress(int completed, int total, int percent, const QString& current);
@@ -76,6 +74,7 @@ private:
     void embedCover();
     void advance(bool ok);
     void emitProgress();
+    [[nodiscard]] int completed() const;
     void writeTags(const Job& job) const;
     [[nodiscard]] QString pathForSong(const QJsonObject& song, const QString& dir) const;
 

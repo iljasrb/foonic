@@ -12,7 +12,6 @@
 #include <QJsonObject>
 #include <QList>
 #include <QHash>
-#include <QPixmap>
 #include <QPoint>
 #include <QSet>
 #include <QStringList>
@@ -191,7 +190,6 @@ private:
     QTreeWidgetItem* m_playlistsHeader{nullptr};
     std::map<QTreeWidgetItem*, std::vector<std::function<void()>>> m_pendingLoads;
     std::set<QTreeWidgetItem*> m_loading;
-    QHash<QString, QPixmap> m_coverCache;
     mutable QHash<QString, QString> m_downloadedCache; // song id -> Downloaded column text
     QList<QPair<QAction*, bool*>> m_scopeActions;      // search-scope actions and the flag they toggle
     QList<QAction*> m_matchActions;

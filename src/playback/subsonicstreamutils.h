@@ -7,7 +7,6 @@
 #pragma once
 
 #include <QByteArray>
-#include <QString>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -57,27 +56,5 @@ inline ContentRange parseContentRange(const QByteArray& header)
     }
 
     return range;
-}
-
-//! Returns the image mime type for @p data, or an empty string if it isn't an image. Some servers
-//! answer a cover request with an error envelope (JSON/HTML); embedding that as "art" corrupts files.
-inline QString imageMimeType(const QByteArray& data, const QString& reported)
-{
-    if(reported.startsWith(QStringLiteral("image/"), Qt::CaseInsensitive)) {
-        return reported;
-    }
-    if(data.startsWith(QByteArrayLiteral("\xFF\xD8\xFF"))) {
-        return QStringLiteral("image/jpeg");
-    }
-    if(data.startsWith(QByteArrayLiteral("\x89PNG\r\n\x1a\n"))) {
-        return QStringLiteral("image/png");
-    }
-    if(data.startsWith(QByteArrayLiteral("GIF8"))) {
-        return QStringLiteral("image/gif");
-    }
-    if(data.startsWith(QByteArrayLiteral("RIFF")) && data.mid(8, 4) == QByteArrayLiteral("WEBP")) {
-        return QStringLiteral("image/webp");
-    }
-    return {};
 }
 } // namespace Fooyin::Subsonic

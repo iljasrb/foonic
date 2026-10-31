@@ -195,7 +195,7 @@ void SubsonicClient::getRandomSongs(ArrayCallback callback, int count)
 }
 
 void SubsonicClient::createPlaylist(const QString& name, const QStringList& songIds,
-                                    std::function<void(bool, const QString&)> callback)
+                                    ResultCallback callback)
 {
     if(name.trimmed().isEmpty()) {
         callback(false, tr("Playlist name is empty."));
@@ -212,7 +212,7 @@ void SubsonicClient::createPlaylist(const QString& name, const QStringList& song
 }
 
 void SubsonicClient::renamePlaylist(const QString& id, const QString& name,
-                                    std::function<void(bool, const QString&)> callback)
+                                    ResultCallback callback)
 {
     QUrlQuery query;
     query.addQueryItem(u"playlistId"_s, id);
@@ -223,7 +223,7 @@ void SubsonicClient::renamePlaylist(const QString& id, const QString& name,
 }
 
 void SubsonicClient::addToPlaylist(const QString& id, const QStringList& songIds,
-                                   std::function<void(bool, const QString&)> callback)
+                                   ResultCallback callback)
 {
     QUrlQuery query;
     query.addQueryItem(u"playlistId"_s, id);
@@ -236,7 +236,7 @@ void SubsonicClient::addToPlaylist(const QString& id, const QStringList& songIds
 }
 
 void SubsonicClient::removeFromPlaylist(const QString& id, QList<int> indexes,
-                                        std::function<void(bool, const QString&)> callback)
+                                        ResultCallback callback)
 {
     if(id.isEmpty() || indexes.isEmpty()) {
         callback(false, tr("Nothing to remove."));
@@ -256,7 +256,7 @@ void SubsonicClient::removeFromPlaylist(const QString& id, QList<int> indexes,
     });
 }
 
-void SubsonicClient::deletePlaylist(const QString& id, std::function<void(bool, const QString&)> callback)
+void SubsonicClient::deletePlaylist(const QString& id, ResultCallback callback)
 {
     QUrlQuery query;
     query.addQueryItem(u"id"_s, id);

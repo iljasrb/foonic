@@ -8,7 +8,6 @@
 
 #include "subsonicclient.h"
 #include "subsonicsettings.h"
-#include "subsonicstreamutils.h"
 #include "subsonictrack.h"
 
 #include <core/engine/audioloader.h>
@@ -19,6 +18,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMimeDatabase>
 #include <QNetworkRequest>
 #include <QRegularExpression>
 #include <QSet>
@@ -75,11 +75,6 @@ SubsonicLibraryDownloader::~SubsonicLibraryDownloader()
 bool SubsonicLibraryDownloader::isActive() const
 {
     return m_active || !m_queue.isEmpty();
-}
-
-int SubsonicLibraryDownloader::total() const
-{
-    return m_total;
 }
 
 int SubsonicLibraryDownloader::completed() const
@@ -395,9 +390,12 @@ void SubsonicLibraryDownloader::embedCover()
         if(!m_cancel && reply->error() == QNetworkReply::NoError) {
             const QByteArray data = reply->readAll();
             if(!data.isEmpty()) {
-                const QString mimeType
-                    = imageMimeType(data, reply->header(QNetworkRequest::ContentTypeHeader).toString());
-                if(mimeType.isEmpty()) {
+                // Trust an image content type; otherwise sniff, so an error envelope is not embedded as art.
+                QString mimeType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+                if(!mimeType.startsWith(u"image/"_s, Qt::CaseInsensitive)) {
+                    mimeType = QMimeDatabase{}.mimeTypeForData(data).name();
+                }
+                if(!mimeType.startsWith(u"image/"_s, Qt::CaseInsensitive)) {
                     qCWarning(SUBSONIC) << "Cover art for" << m_current.path << "is not an image; skipping";
                 }
                 else {

@@ -96,11 +96,9 @@ struct StreamState
     std::stop_token token;
     std::mutex mutex;
     std::condition_variable_any ready;
-    // Seekbar publish throttle/dedupe. Guarded by `mutex` so the decoder and network threads can both
+    // Seekbar publish throttle. Guarded by `mutex` so the decoder and network threads can both
     // publish as the transfer grows.
     qint64 lastPublishMs{-1000};
-    double lastPublishStart{-1.0};
-    double lastPublishEnd{-1.0};
 
     [[nodiscard]] bool canSeek() const
     {
@@ -479,7 +477,7 @@ public:
 
         // Don't start the request here: FFmpeg may issue several seeks before reading, and the backward
         // margin above collapses its backwards probes into memory. The request starts on the next read.
-        publishBuffer(true);
+        resetBuffer();
         return QIODevice::seek(pos);
     }
 
@@ -575,8 +573,6 @@ protected:
         const QPointer<QNetworkReply> reply = m_state->reply;
         lock.unlock();
 
-        publishBuffer();
-
         // Pull data QNAM buffered but hasn't signalled yet.
         if(reply) {
             QMetaObject::invokeMethod(
@@ -605,6 +601,16 @@ protected:
     }
 
 private:
+    //! Clears the seekbar band after a re-fetch; the new range is published as data arrives.
+    void resetBuffer()
+    {
+        if(!m_monitor) {
+            return;
+        }
+        const auto monitor = m_monitor;
+        QMetaObject::invokeMethod(monitor.get(), [monitor] { monitor->reset(); }, Qt::QueuedConnection);
+    }
+
     //! Publishes the downloaded range to the seekbar overlay. Bytes are used as fractions of the track;
     //! for VBR streams that is an approximation, but it is the only progress the device has.
     void publishBuffer(bool force = false)
@@ -627,17 +633,13 @@ private:
             const qint64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now().time_since_epoch())
                                    .count();
-            start = std::clamp(static_cast<double>(base) / static_cast<double>(total), 0.0, 1.0);
-            last  = std::clamp(static_cast<double>(end) / static_cast<double>(total), 0.0, 1.0);
-
-            const bool changed = !qFuzzyCompare(start, m_state->lastPublishStart)
-                              || !qFuzzyCompare(last, m_state->lastPublishEnd);
-            if(!force && (!changed || now - m_state->lastPublishMs < 100)) {
+            if(!force && now - m_state->lastPublishMs < 100) {
                 return;
             }
-            m_state->lastPublishMs    = now;
-            m_state->lastPublishStart = start;
-            m_state->lastPublishEnd   = last;
+            m_state->lastPublishMs = now;
+
+            start = std::clamp(static_cast<double>(base) / static_cast<double>(total), 0.0, 1.0);
+            last  = std::clamp(static_cast<double>(end) / static_cast<double>(total), 0.0, 1.0);
         }
 
         const auto monitor = m_monitor;

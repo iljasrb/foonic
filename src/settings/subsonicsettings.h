@@ -37,6 +37,7 @@ struct SubsonicSettings
     int seekFadeMs{200};               // seek fade length
     int coverArtSize{300};             // cover art requested from the server, in px
     bool scrobblePlays{true};          // report now-playing + play counts back to the server
+    bool bufferBarEnabled{true};       // paint the buffered range on the seekbar
 
     [[nodiscard]] bool isValid() const
     {
@@ -78,6 +79,7 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/SeekFadeMs"), 200);
     settings->createSetting(QStringLiteral("Subsonic/CoverArtSize"), 300);
     settings->createSetting(QStringLiteral("Subsonic/ScrobblePlays"), true);
+    settings->createSetting(QStringLiteral("Subsonic/BufferBarEnabled"), true);
     settings->createSetting(QStringLiteral("Subsonic/ArtistSort"), 0);
     settings->createSetting(QStringLiteral("Subsonic/AlbumSort"), 0);
     settings->createSetting(QStringLiteral("Subsonic/PlaylistSort"), 0);
@@ -111,6 +113,7 @@ inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
     result.seekFadeMs        = std::clamp(settings->value(QStringLiteral("Subsonic/SeekFadeMs")).toInt(), 0, 5000);
     result.coverArtSize      = std::clamp(settings->value(QStringLiteral("Subsonic/CoverArtSize")).toInt(), 64, 2000);
     result.scrobblePlays     = settings->value(QStringLiteral("Subsonic/ScrobblePlays")).toBool();
+    result.bufferBarEnabled  = settings->value(QStringLiteral("Subsonic/BufferBarEnabled")).toBool();
     return result;
 }
 
@@ -132,5 +135,6 @@ inline void saveSubsonicSettings(SettingsManager* settings, const SubsonicSettin
     settings->set(QStringLiteral("Subsonic/SeekFadeMs"), subsonic.seekFadeMs);
     settings->set(QStringLiteral("Subsonic/CoverArtSize"), subsonic.coverArtSize);
     settings->set(QStringLiteral("Subsonic/ScrobblePlays"), subsonic.scrobblePlays);
+    settings->set(QStringLiteral("Subsonic/BufferBarEnabled"), subsonic.bufferBarEnabled);
 }
 } // namespace Fooyin::Subsonic

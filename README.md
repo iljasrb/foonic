@@ -80,6 +80,7 @@ All under **Settings → Foonic**:
 - **Remote prebuffer** — audio buffered before playback resumes after a remote seek (default 400 ms).
 - **Seek fade** — fade out/in around remote seeks, and the fade length (default 200 ms).
 - **Scrobbling** — report now playing and play counts back to the server.
+- **Buffered range on the seekbar** — show the downloaded part of the current remote track.
 - **Library folder** — where **Download to Library** saves tracks (default `~/Music/Subsonic`). Point
   it at a folder inside one of your fooyin library paths so downloads become library tracks.
 

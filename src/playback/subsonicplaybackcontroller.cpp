@@ -21,6 +21,7 @@
 #include <QFileInfo>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -200,7 +201,7 @@ void SubsonicPlaybackController::tryPrefetch()
     if(m_bufferMonitor->end() < 0.999) {
         return;
     }
-    if(m_pendingPrefetchId == m_prefetchId || m_pendingPrefetchId == songIdForTrack(m_player->currentTrack())
+    if(m_pendingPrefetchId == songIdForTrack(m_player->currentTrack())
        || QFileInfo::exists(prefetchPath(m_pendingPrefetchId))) {
         return;
     }
@@ -210,19 +211,21 @@ void SubsonicPlaybackController::tryPrefetch()
 
 void SubsonicPlaybackController::startPrefetch(const QString& songId)
 {
-    QDir{}.mkpath(prefetchDir());
+    const QString dir = prefetchDir();
+    QDir{}.mkpath(dir);
 
-    // Keep at most the current track's file and the one being prefetched.
+    // Keep at most the current track's files and the one being prefetched.
     const QString currentId = songIdForTrack(m_player->currentTrack());
-    const QDir dir{prefetchDir()};
-    for(const QString& name : dir.entryList(QDir::Files)) {
-        const QString id = name.section(u'.', 0, 0);
-        if(id != songId && id != currentId) {
-            QFile::remove(dir.filePath(name));
+    const QStringList keep{songId + u".part"_s, songId + u".ready"_s, currentId + u".part"_s,
+                           currentId + u".ready"_s};
+    const QDir prefetch{dir};
+    for(const QString& name : prefetch.entryList(QDir::Files)) {
+        if(!keep.contains(name)) {
+            QFile::remove(prefetch.filePath(name));
         }
     }
 
-    const QString partPath = prefetchDir() + u'/' + songId + u".part"_s;
+    const QString partPath = dir + u'/' + songId + u".part"_s;
     QFile::remove(partPath);
 
     auto* file = new QFile{partPath, this};
@@ -280,6 +283,5 @@ void SubsonicPlaybackController::cancelPrefetch()
     auto* reply = m_prefetchReply;
     m_prefetchReply = nullptr;
     reply->abort();
-    reply->deleteLater();
 }
 } // namespace Fooyin::Subsonic

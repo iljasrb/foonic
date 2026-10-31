@@ -13,7 +13,10 @@ class QEvent;
 class QTimer;
 class QWidget;
 
-namespace Fooyin::Subsonic {
+namespace Fooyin {
+class SettingsManager;
+
+namespace Subsonic {
 /*!
  * Downloaded range of the current remote stream, as fractions of the track. Updated from the
  * decoder thread and read on the GUI thread.
@@ -52,18 +55,21 @@ class SubsonicBufferBar : public QObject
     Q_OBJECT
 
 public:
-    explicit SubsonicBufferBar(SubsonicBufferMonitor* monitor, QObject* parent = nullptr);
+    SubsonicBufferBar(SettingsManager* settings, SubsonicBufferMonitor* monitor, QObject* parent = nullptr);
     ~SubsonicBufferBar() override;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    [[nodiscard]] bool enabled() const;
     void scan();
     void updateOverlays();
 
+    SettingsManager* m_settings;
     SubsonicBufferMonitor* m_monitor;
     QHash<QWidget*, BufferOverlay*> m_overlays;
     QTimer* m_scanTimer;
 };
-} // namespace Fooyin::Subsonic
+} // namespace Subsonic
+} // namespace Fooyin

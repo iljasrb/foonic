@@ -70,7 +70,7 @@ void SubsonicPlugin::initialise(const GuiPluginContext& context)
     new SubsonicSettingsPage{m_network, m_settings, this};
 
     if(m_bufferMonitor) {
-        new SubsonicBufferBar{m_bufferMonitor.get(), this};
+        new SubsonicBufferBar{m_settings, m_bufferMonitor.get(), this};
     }
 
     m_widgetProvider->registerWidget(

@@ -6,16 +6,21 @@
 
 #include "subsonicbufferbar.h"
 
+#include "subsonicsettings.h"
+
+#include <utils/settings/settingsdialogcontroller.h>
+
 #include <QAbstractSlider>
 #include <QApplication>
 #include <QEvent>
 #include <QPainter>
-#include <QSet>
 #include <QSlider>
 #include <QStyle>
 #include <QStyleOptionSlider>
 #include <QTimer>
 #include <QWidget>
+
+#include <QtAlgorithms>
 
 #include <algorithm>
 #include <utility>
@@ -92,9 +97,23 @@ public:
         update();
     }
 
+    //! Hides the band without detaching the overlay (used by the settings toggle).
+    void setBandEnabled(bool enabled)
+    {
+        if(m_bandEnabled == enabled) {
+            return;
+        }
+        m_bandEnabled = enabled;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent*) override
     {
+        if(!m_bandEnabled) {
+            return;
+        }
+
         auto* slider = qobject_cast<QSlider*>(parentWidget());
         if(!slider || slider->maximum() <= slider->minimum()) {
             return;
@@ -174,6 +193,7 @@ protected:
 
 private:
     QTimer* m_animTimer;
+    bool m_bandEnabled{true};
     double m_targetEnd{-1.0};
     double m_displayStart{-1.0};
     double m_displayEnd{-1.0};
@@ -217,14 +237,21 @@ double SubsonicBufferMonitor::end() const
     return m_end;
 }
 
-SubsonicBufferBar::SubsonicBufferBar(SubsonicBufferMonitor* monitor, QObject* parent)
+SubsonicBufferBar::SubsonicBufferBar(SettingsManager* settings, SubsonicBufferMonitor* monitor, QObject* parent)
     : QObject{parent}
+    , m_settings{settings}
     , m_monitor{monitor}
     , m_scanTimer{new QTimer{this}}
 {
     connect(m_scanTimer, &QTimer::timeout, this, &SubsonicBufferBar::scan);
     if(m_monitor) {
         connect(m_monitor, &SubsonicBufferMonitor::rangeChanged, this, &SubsonicBufferBar::updateOverlays);
+    }
+    // The settings dialog is the only way this toggle changes; re-read it when it closes.
+    if(m_settings) {
+        if(auto* dialog = m_settings->settingsDialog()) {
+            connect(dialog, &SettingsDialogController::closing, this, &SubsonicBufferBar::updateOverlays);
+        }
     }
     scan();
     // fooyin recreates seekbars on layout changes with no signal a plugin can hook; a cheap rescan
@@ -234,9 +261,7 @@ SubsonicBufferBar::SubsonicBufferBar(SubsonicBufferMonitor* monitor, QObject* pa
 
 SubsonicBufferBar::~SubsonicBufferBar()
 {
-    for(BufferOverlay* overlay : std::as_const(m_overlays)) {
-        delete overlay;
-    }
+    qDeleteAll(m_overlays);
 }
 
 bool SubsonicBufferBar::eventFilter(QObject* watched, QEvent* event)
@@ -254,7 +279,6 @@ bool SubsonicBufferBar::eventFilter(QObject* watched, QEvent* event)
     switch(event->type()) {
         case QEvent::Resize:
         case QEvent::Show:
-        case QEvent::Move:
         case QEvent::StyleChange:
         case QEvent::PaletteChange:
         case QEvent::LayoutDirectionChange:
@@ -270,9 +294,16 @@ bool SubsonicBufferBar::eventFilter(QObject* watched, QEvent* event)
 
 void SubsonicBufferBar::updateOverlays()
 {
+    const bool on = enabled();
     for(BufferOverlay* overlay : std::as_const(m_overlays)) {
+        overlay->setBandEnabled(on);
         overlay->setRange(m_monitor->start(), m_monitor->end());
     }
+}
+
+bool SubsonicBufferBar::enabled() const
+{
+    return !m_settings || loadSubsonicSettings(m_settings).bufferBarEnabled;
 }
 
 void SubsonicBufferBar::scan()
@@ -280,8 +311,6 @@ void SubsonicBufferBar::scan()
     if(!m_monitor) {
         return;
     }
-
-    QSet<QWidget*> found;
 
     const QWidgetList widgets = QApplication::allWidgets();
     for(QWidget* widget : widgets) {
@@ -293,7 +322,6 @@ void SubsonicBufferBar::scan()
         if(!slider) {
             continue;
         }
-        found.insert(slider);
 
         if(m_overlays.contains(slider)) {
             continue;
@@ -301,25 +329,15 @@ void SubsonicBufferBar::scan()
 
         auto* overlay = new BufferOverlay{slider};
         m_overlays.insert(slider, overlay);
+        overlay->setBandEnabled(enabled());
         overlay->setRange(m_monitor->start(), m_monitor->end());
         slider->installEventFilter(this);
         connect(slider, &QAbstractSlider::valueChanged, overlay, qOverload<>(&QWidget::update));
-        connect(slider, &QAbstractSlider::sliderMoved, overlay, qOverload<>(&QWidget::update));
         connect(slider, &QObject::destroyed, this, [this, slider] { m_overlays.remove(slider); });
 
         overlay->setGeometry(slider->rect());
         overlay->show();
         overlay->raise();
-    }
-
-    for(auto it = m_overlays.begin(); it != m_overlays.end();) {
-        if(!found.contains(it.key())) {
-            it.value()->deleteLater();
-            it = m_overlays.erase(it);
-        }
-        else {
-            ++it;
-        }
     }
 }
 } // namespace Fooyin::Subsonic

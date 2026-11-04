@@ -102,6 +102,7 @@ private:
     qint64 m_totalBytes{-1};
     bool m_rangeChecked{false};
     bool m_sentRange{false};
+    bool m_useDownloadEndpoint{true};
     qint64 m_lastProgressEmit{0};
 };
 } // namespace Subsonic

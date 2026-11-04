@@ -8,6 +8,7 @@
 
 #include "subsonicbufferbar.h"
 #include "subsonicsettings.h"
+#include "subsonicstreamcache.h"
 #include "subsonicstreamutils.h"
 
 #include <core/engine/audioinput.h>
@@ -20,6 +21,9 @@
 #include <core/track.h>
 
 #include <QByteArray>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -33,6 +37,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
+#include <QUuid>
 
 #include <algorithm>
 #include <atomic>
@@ -48,25 +53,45 @@ using namespace Qt::StringLiterals;
 
 namespace {
 constexpr auto OpenHeaderTimeout = std::chrono::seconds{10};
-constexpr qint64 DefaultBufferBytes = 64LL * 1024 * 1024;
 constexpr int MaxStreamRetries = 3;
 constexpr int StreamRetryDelayMs = 500;
 // A dropped link does not reset the socket, so QNAM keeps the reply "in progress" and a blocked read
 // never returns, freezing pause/seek until the network comes back. Time out on inactivity instead.
 constexpr int StreamIdleTimeoutMs = 5000;
 // FFmpeg probes a few KB backwards after a seek to find the frame boundary. Fetch this much before a
-// backward target so that probe hits memory, but keep it small: the pre-roll has to download before the
-// target byte is readable, and a megabyte-scale margin made every seek wait for it.
+// backward target so that probe hits the cache.
 constexpr qint64 SeekBackMargin = 128LL * 1024;
-// A forward seek within this distance keeps the buffer and waits for the running download to reach the
-// target instead of re-requesting: FFmpeg jumps to the end of the file before bisecting, and discarding
-// the buffer there threw away tens of megabytes on every seek.
-constexpr qint64 ForwardWaitGap = 32LL * 1024 * 1024;
+// A forward seek within this distance keeps the running transfer and waits for it to reach the
+// target instead of cancelling and re-requesting.
+constexpr qint64 CoverWaitGap = 2LL * 1024 * 1024;
+qint64 monotonicMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 // Diagnostics: identifies each device instance and request in the debug log.
 int nextDeviceId()
 {
     static std::atomic<int> next{0};
     return ++next;
+}
+
+//! Removes caches left behind by a previous crash; files still in use are recent and kept.
+void removeStaleStreamCaches()
+{
+    const QDir dir{Fooyin::Subsonic::streamCacheDir()};
+    if(!dir.exists()) {
+        return;
+    }
+    const QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays(-1);
+    const QFileInfoList files = dir.entryInfoList({QStringLiteral("stream-*.cache")}, QDir::Files);
+    for(const QFileInfo& file : files) {
+        if(file.lastModified().toUTC() < cutoff) {
+            QFile::remove(file.absoluteFilePath());
+        }
+    }
 }
 } // namespace
 
@@ -75,86 +100,90 @@ namespace {
 struct StreamState
 {
     QPointer<QNetworkReply> reply;
-    QByteArray buffer;
-    qsizetype readPos{0};
-    qint64 bufferBase{0}; // file offset of buffer[0]
-    qint64 maxBytes{DefaultBufferBytes};
+    QFile cache;
+    QString cachePath;
+    RangeSet cached;
+
+    // Total size of the track. -1 until the server tells us (or forever for chunked streams).
     qint64 total{-1};
-    qint64 skip{0};
-    qint64 requestedStart{0};
-    qint64 skipTo{-1}; // file offset to wait for on a forward seek, -1 = none
+    // Logical read position. QIODevice::pos() is not updated for sequential devices, and the
+    // device can be sequential until the headers reveal a size, so keep our own offset.
+    qint64 readPos{0};
+    // Range requested for the current transfer and its exclusive end (-1 = open ended).
+    qint64 requestedStart{-1};
+    qint64 activeLimit{-1};
+    // Next file offset to write bytes from the current response to. -1 until headers arrive.
+    qint64 writePos{-1};
+    // File offset of the first byte of the current response.
+    qint64 responseStart{-1};
+    // Set by seek(): the next read starts a transfer for this position.
+    qint64 pendingStart{-1};
+    // Set while a decoder read is blocked on an uncached position.
+    qint64 waitingPos{-1};
+    bool pendingRequest{false};
+    // A request has been posted to the network thread but the reply does not exist yet.
+    bool requestPosted{false};
     bool rangeCapable{false};
     bool headersProcessed{false};
-    int status{0}; // HTTP status of the current reply, 0 = none
-    bool pendingRequest{false};
+    //! True when the current response is a full 200 body from offset zero.
+    bool fullResponse{false};
+    bool streamEnded{false};
+    int status{0};
     int attempts{0};
+    int requestSequence{0};
     bool nonBlocking{false};
     bool readWouldBlock{false};
-    bool finished{false};
     bool aborted{false};
     QString error;
     std::stop_token token;
+
     std::mutex mutex;
     std::condition_variable_any ready;
-    // Seekbar publish throttle. Guarded by `mutex` so the decoder and network threads can both
-    // publish as the transfer grows.
+
+    // Seekbar publish throttle. Guarded by `mutex`; the decoder and network threads both publish.
     qint64 lastPublishMs{-1000};
+    // Last seek time (steady clock). Background hole filling stays quiet briefly around seeks so
+    // FFmpeg's backward probes can hit the pre-roll instead of cancelling a fill per probe.
+    qint64 lastSeekMs{-1000};
 
     [[nodiscard]] bool canSeek() const
     {
-        return total >= 0 && rangeCapable;
+        // A known size is enough: ranges are used when available, otherwise a seek waits for the
+        // sequential transfer to reach the target. The disk cache serves everything already read.
+        return total >= 0;
     }
 
-    [[nodiscard]] qsizetype buffered() const
+    [[nodiscard]] bool complete() const
     {
-        return std::max<qsizetype>(0, buffer.size() - readPos);
+        return total >= 0 && cached.coversAll(total);
     }
 
-    //! Reads whatever the reply has buffered. Caller must hold the mutex.
-    void appendFromReply(QNetworkReply* source)
+    //! True while the current response is expected to reach @p pos. Caller must hold the mutex.
+    [[nodiscard]] bool willCover(qint64 pos) const
     {
-        if(!source->isOpen()) {
-            return;
+        if(!reply || aborted || !error.isEmpty()) {
+            return false;
         }
-
-        // Retain consumed history so backward seeks stay in memory; only drop it once the buffer is full.
-        if(buffer.size() >= maxBytes && readPos > 0) {
-            bufferBase += readPos;
-            buffer.remove(0, readPos);
-            readPos = 0;
+        if(!headersProcessed) {
+            return requestedStart >= 0 && requestedStart <= pos && (activeLimit < 0 || pos < activeLimit);
         }
-
-        const qint64 space = maxBytes - buffer.size();
-        if(space <= 0 && skip <= 0) {
-            return;
+        if(writePos < 0 || writePos > pos) {
+            return false;
         }
-
-        QByteArray chunk = source->read(space + skip);
-        if(chunk.isEmpty()) {
-            return;
-        }
-
-        if(skip > 0) {
-            const qsizetype drop = static_cast<qsizetype>(std::min<qint64>(skip, chunk.size()));
-            chunk.remove(0, drop);
-            skip -= drop;
-        }
-
-        if(!chunk.isEmpty() && space > 0) {
-            buffer.append(chunk.left(space));
-            attempts = 0; // data is flowing again, so the next drop gets a fresh retry budget
-        }
+        return activeLimit < 0 || pos < activeLimit;
     }
 
-    //! Derives size/range support/skip offset from response headers. Caller must hold the mutex.
+    //! Derives size/range support/response offset from headers. Caller must hold the mutex.
     void updateHeaders(QNetworkReply* source)
     {
-        if(headersProcessed) {
+        if(headersProcessed || !source) {
             return;
         }
         headersProcessed = true;
         status           = source->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
+        qint64 responseOffset = requestedStart >= 0 ? requestedStart : 0;
+        bool contentRangeSeen = false;
         const QByteArray contentRange = source->rawHeader("Content-Range");
         if(!contentRange.isEmpty()) {
             const ContentRange range = parseContentRange(contentRange);
@@ -162,46 +191,115 @@ struct StreamState
                 total = range.total;
             }
             if(range.start >= 0) {
-                skip = std::max<qint64>(0, requestedStart - range.start);
+                responseOffset = range.start;
             }
-            rangeCapable = true;
-            qCDebug(SUBSONIC) << "stream headers: status" << status << "content-range" << contentRange << "total"
-                              << total << "skip" << skip;
-            return;
+            contentRangeSeen = true;
+            rangeCapable     = true;
         }
-
-        const qint64 contentLength = source->header(QNetworkRequest::ContentLengthHeader).toLongLong();
-        if(contentLength > 0 && total < 0) {
-            total = contentLength;
+        if(status == 206) {
+            rangeCapable = true;
         }
         if(source->rawHeader("Accept-Ranges").toLower().contains("bytes")) {
             rangeCapable = true;
         }
-        // The server ignored our Range request and is sending from 0 again.
-        if(status == 200 && requestedStart > 0) {
-            skip = requestedStart;
+
+        if(!contentRangeSeen && status == 200) {
+            // The server ignored the Range request and is sending the whole file from zero. Keep all
+            // of it in the cache instead of discarding a prefix; the read will wait for its offset.
+            fullResponse               = true;
+            responseOffset             = 0;
+            const qint64 contentLength = source->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+            if(contentLength > 0) {
+                // A 200 body is the complete representation, so its Content-Length is exact even
+                // when an earlier transcoded response carried an estimate.
+                total = contentLength;
+            }
+            activeLimit = total;
         }
-        qCDebug(SUBSONIC) << "stream headers: status" << status << "total" << total << "rangeCapable" << rangeCapable
-                          << "skip" << skip;
+        else {
+            fullResponse = false;
+        }
+
+        if(status >= 400) {
+            error = QStringLiteral("HTTP %1").arg(status);
+        }
+        else if(contentRangeSeen && requestedStart >= 0 && responseOffset > requestedStart) {
+            // A range that starts after the requested byte can never satisfy the read.
+            error = QStringLiteral("The server returned an unexpected byte range.");
+        }
+
+        responseStart = responseOffset;
+        writePos      = responseOffset;
+        qCDebug(SUBSONIC) << "stream headers: status" << status << "content-range" << contentRange << "total" << total
+                          << "rangeCapable" << rangeCapable << "start" << writePos << "limit" << activeLimit;
+    }
+
+    //! Drains whatever the reply has buffered into the disk cache. Caller must hold the mutex.
+    void appendFromReply(QNetworkReply* source)
+    {
+        if(!source || source != reply || writePos < 0 || !cache.isOpen() || !error.isEmpty()) {
+            return;
+        }
+
+        QByteArray chunk = source->readAll();
+        if(chunk.isEmpty()) {
+            return;
+        }
+        if(total > 0 && !fullResponse) {
+            // A ranged response must stay inside the representation; anything beyond its reported
+            // size is not part of the track.
+            if(writePos >= total) {
+                return;
+            }
+            const qint64 room = total - writePos;
+            if(chunk.size() > room) {
+                chunk.truncate(static_cast<qsizetype>(room));
+            }
+        }
+        if(chunk.isEmpty()) {
+            return;
+        }
+
+        if(!cache.seek(writePos)) {
+            error = QStringLiteral("Could not seek the stream cache: %1").arg(cache.errorString());
+            return;
+        }
+
+        qint64 written{0};
+        while(written < chunk.size()) {
+            const qint64 count = cache.write(chunk.constData() + written, chunk.size() - written);
+            if(count <= 0) {
+                error = QStringLiteral("Could not write the stream cache: %1").arg(cache.errorString());
+                return;
+            }
+            written += count;
+        }
+        cache.flush();
+
+        cached.add(writePos, writePos + written);
+        writePos += written;
+        if(fullResponse && total > 0 && writePos > total) {
+            // The transcoded stream is longer than the server's estimate. Keep the extra bytes and
+            // use the real high-water mark as the size instead of truncating playback.
+            total       = writePos;
+            activeLimit = total;
+        }
+        attempts = 0; // data is flowing again, so the next drop gets a fresh retry budget
     }
 };
 
 class SubsonicStreamDevice : public QIODevice, public RemoteStreamDevice
 {
 public:
-    SubsonicStreamDevice(std::shared_ptr<NetworkAccessManager> network, QUrl url, bool ignoreSslErrors,
-                         qsizetype bufferBytes, std::shared_ptr<SubsonicBufferMonitor> monitor,
-                         QObject* parent = nullptr)
+    SubsonicStreamDevice(std::shared_ptr<QNetworkAccessManager> network, QUrl url, bool ignoreSslErrors,
+                         std::shared_ptr<SubsonicBufferMonitor> monitor, QObject* parent = nullptr)
         : QIODevice{parent}
         , m_network{std::move(network)}
         , m_url{std::move(url)}
         , m_ignoreSslErrors{ignoreSslErrors}
-        , m_bufferBytes{bufferBytes}
         , m_monitor{std::move(monitor)}
         , m_state{std::make_shared<StreamState>()}
-    {
-        m_state->maxBytes = bufferBytes;
-    }
+    { }
 
     ~SubsonicStreamDevice() override
     {
@@ -215,7 +313,8 @@ public:
 
     [[nodiscard]] bool isSequential() const override
     {
-        return !canSeek();
+        const std::scoped_lock lock{m_state->mutex};
+        return !m_state->canSeek();
     }
 
     [[nodiscard]] qint64 size() const override
@@ -227,13 +326,7 @@ public:
     [[nodiscard]] qint64 bytesAvailable() const override
     {
         const std::scoped_lock lock{m_state->mutex};
-        return m_state->buffered();
-    }
-
-    [[nodiscard]] bool canSeek() const
-    {
-        const std::scoped_lock lock{m_state->mutex};
-        return m_state->canSeek();
+        return m_state->cached.contiguousBytes(m_state->readPos);
     }
 
     [[nodiscard]] bool readWouldBlock() const override
@@ -245,7 +338,7 @@ public:
     [[nodiscard]] qsizetype bufferedByteCount() const override
     {
         const std::scoped_lock lock{m_state->mutex};
-        return m_state->buffered();
+        return static_cast<qsizetype>(m_state->cached.contiguousBytes(m_state->readPos));
     }
 
     void setNonBlockingReadsEnabled(bool enabled) override
@@ -272,17 +365,40 @@ public:
     //! Resumes the transfer from @p from after a dropped connection. Called on the decoder thread.
     void scheduleRetry(qint64 from)
     {
-        // The device lives on the decoder thread, which has no event loop, so a timer bound to it never
-        // fires. Run the delay on the network thread (which does) and keep a QPointer to the device.
         const auto network = m_network;
         const QPointer<SubsonicStreamDevice> device{this};
         QMetaObject::invokeMethod(network.get(), [network, device, from] {
             QTimer::singleShot(StreamRetryDelayMs, network.get(), [device, from] {
                 if(device) {
-                    device->startRequest(from);
+                    device->startTransfer(from, -1, true);
                 }
             });
         });
+    }
+
+    //! Fills the first hole left behind by a seek so the whole track ends up cached. Network thread.
+    //! @p fromRead suppresses fills for a short time after a seek; read-driven fills otherwise
+    //! fight FFmpeg's seek probes. Finished transfers always get to schedule a fill.
+    void fillNextGap(bool fromRead = false)
+    {
+        qint64 start{-1};
+        qint64 end{-1};
+        {
+            const std::scoped_lock lock{m_state->mutex};
+            if(m_state->aborted || m_state->reply || m_state->requestPosted || m_state->pendingRequest
+               || !m_state->error.isEmpty() || m_state->total < 0 || m_state->waitingPos >= 0
+               || (fromRead && monotonicMs() - m_state->lastSeekMs < 500)) {
+                return;
+            }
+            const auto gap = m_state->cached.firstGap(m_state->total);
+            if(!gap) {
+                m_state->streamEnded = true;
+                return;
+            }
+            start = gap->start;
+            end   = gap->end;
+        }
+        startTransfer(start, end, false);
     }
 
     bool open(OpenMode mode) override
@@ -295,55 +411,93 @@ public:
             return false;
         }
 
+        const QString dir = streamCacheDir();
+        QDir{}.mkpath(dir);
+        removeStaleStreamCaches();
+        const QString cachePath
+            = dir + u"/stream-%1.cache"_s.arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+
         {
             const std::scoped_lock lock{m_state->mutex};
-            m_state->buffer.clear();
-            m_state->readPos          = 0;
-            m_state->bufferBase       = 0;
+            m_state->cachePath = cachePath;
+            m_state->cache.setFileName(cachePath);
+            if(!m_state->cache.open(QIODevice::ReadWrite | QIODevice::Truncate | QIODevice::Unbuffered)) {
+                setErrorString(QStringLiteral("Could not create the stream cache: %1")
+                                   .arg(m_state->cache.errorString()));
+                return false;
+            }
+            m_state->cached.clear();
             m_state->total            = -1;
-            m_state->skip             = 0;
-            m_state->requestedStart   = 0;
+            m_state->readPos          = 0;
+            m_state->requestedStart   = -1;
+            m_state->activeLimit      = -1;
+            m_state->writePos         = -1;
+            m_state->responseStart    = -1;
+            m_state->pendingStart     = -1;
+            m_state->pendingRequest   = false;
+            m_state->requestPosted    = false;
             m_state->rangeCapable     = false;
             m_state->headersProcessed = false;
+            m_state->streamEnded      = false;
             m_state->status           = 0;
-            m_state->pendingRequest   = false;
-            m_state->skipTo          = -1;
-            m_state->finished         = false;
+            m_state->attempts         = 0;
             m_state->aborted          = false;
             m_state->error.clear();
             m_state->reply.clear();
         }
 
-        QIODevice::open(mode);
         m_clock.start();
-        qCDebug(SUBSONIC) << "stream" << m_id << "open";
-        startRequest(0);
+        qCDebug(SUBSONIC) << "stream" << m_id << "open cache" << cachePath;
+        startTransfer(0, -1, false);
+
+        // Never block the thread that owns the network manager: its event loop is what delivers the
+        // reply. Fooyin opens remote sources from the GUI thread for resolver probes; waiting here
+        // deadlocks the whole application and also blocks the playback stream's network callbacks.
+        if(QThread::currentThread() == m_network->thread()) {
+            if(!QIODevice::open(mode)) {
+                setErrorString(QStringLiteral("Could not open the Subsonic stream."));
+                close();
+                return false;
+            }
+            qCDebug(SUBSONIC) << "stream" << m_id << "open deferred on the network thread";
+            return true;
+        }
 
         // Wait briefly for headers so size()/canSeek() are valid during decoder init.
         QString error;
         qint64 total{-1};
         int status{0};
         bool seekable{false};
+        bool aborted{false};
         {
             std::unique_lock lock{m_state->mutex};
             m_state->ready.wait_for(lock, OpenHeaderTimeout, [this] {
-                return m_state->headersProcessed || m_state->finished || !m_state->error.isEmpty();
+                return m_state->headersProcessed || m_state->streamEnded || !m_state->error.isEmpty();
             });
             error    = m_state->error;
             total    = m_state->total;
             status   = m_state->status;
             seekable = m_state->canSeek();
+            aborted  = m_state->aborted;
         }
 
+        if(aborted) {
+            close();
+            return false;
+        }
         if(error.isEmpty() && status < 200) {
             error = QStringLiteral("No response from the server.");
         }
         qCDebug(SUBSONIC) << "stream" << m_id << "open result: total" << total << "status" << status << "seekable"
                           << seekable << "error" << error;
         if(!error.isEmpty()) {
-            // Reporting an empty stream as "opened" made the player treat the track as a live stream and
-            // grey out the seekbar instead of failing it.
             setErrorString(error);
+            close();
+            return false;
+        }
+        // Open after the headers so QIODevice sees the correct sequential/seekable mode.
+        if(!QIODevice::open(mode)) {
+            setErrorString(QStringLiteral("Could not open the Subsonic stream."));
             close();
             return false;
         }
@@ -357,17 +511,25 @@ public:
             qCDebug(SUBSONIC) << "stream" << m_id << "close t" << m_clock.elapsed() << "requests"
                               << m_requests.load();
         }
+
         QPointer<QNetworkReply> reply;
+        QString cachePath;
         {
             const std::scoped_lock lock{m_state->mutex};
-            if(m_state->aborted && !m_state->reply) {
+            if(m_state->aborted && !m_state->reply && !m_state->cache.isOpen()) {
                 QIODevice::close();
                 return;
             }
-            m_state->aborted  = true;
-            m_state->finished = true;
-            reply             = m_state->reply;
+            m_state->aborted = true;
+            m_state->streamEnded = true;
+            ++m_state->requestSequence;
+            m_state->requestPosted  = false;
+            m_state->pendingRequest = false;
+            reply                   = m_state->reply;
             m_state->reply.clear();
+            m_state->cache.close();
+            cachePath = m_state->cachePath;
+            m_state->cachePath.clear();
         }
         m_state->ready.notify_all();
 
@@ -379,6 +541,9 @@ public:
                 }
             });
         }
+        if(!cachePath.isEmpty()) {
+            QFile::remove(cachePath);
+        }
         QIODevice::close();
     }
 
@@ -387,55 +552,6 @@ public:
         if(pos < 0 || !isOpen()) {
             return false;
         }
-        if(pos == QIODevice::pos()) {
-            return true;
-        }
-
-        bool handled{false};
-        qint64 bufferBase{0};
-        qsizetype bufferBytes{0};
-        qint64 total{-1};
-        qint64 skipTo{-1};
-        qsizetype readPos{0};
-        bool finished{false};
-        bool pendingRequest{false};
-        bool nonBlocking{false};
-        {
-            const std::scoped_lock lock{m_state->mutex};
-            if(m_state->aborted) {
-                return false;
-            }
-            bufferBase       = m_state->bufferBase;
-            bufferBytes      = m_state->buffer.size();
-            const qint64 end = bufferBase + bufferBytes;
-
-            if(pos >= bufferBase && pos <= end) {
-                // Already downloaded: just move the cursor.
-                m_state->readPos = static_cast<qsizetype>(pos - bufferBase);
-                m_state->skipTo  = -1;
-                handled          = true;
-            }
-            else if(pos > end && pos - end <= ForwardWaitGap && m_state->reply && !m_state->finished
-                    && m_state->error.isEmpty()) {
-                // Still downloading forward: wait for it to cover `pos` instead of dropping the buffer
-                // (which would also lose everything already downloaded behind us).
-                m_state->skipTo = pos;
-                handled         = true;
-            }
-            total          = m_state->total;
-            skipTo         = m_state->skipTo;
-            readPos        = m_state->readPos;
-            finished       = m_state->finished;
-            pendingRequest = m_state->pendingRequest;
-            nonBlocking    = m_state->nonBlocking;
-        }
-        qCDebug(SUBSONIC) << "stream" << m_id << "seek" << pos << (handled ? "buffered/wait" : "refetch")
-                          << "bufferBase" << bufferBase << "bufferBytes" << bufferBytes << "readPos" << readPos
-                          << "total" << total << "skipTo" << skipTo << "finished" << finished << "pending"
-                          << pendingRequest << "nonBlocking" << nonBlocking << "t" << m_clock.elapsed();
-        if(handled) {
-            return QIODevice::seek(pos);
-        }
 
         QPointer<QNetworkReply> oldReply;
         {
@@ -443,26 +559,52 @@ public:
             if(m_state->aborted) {
                 return false;
             }
+            m_state->lastSeekMs = monotonicMs();
+            if(m_state->total >= 0 && pos > m_state->total) {
+                return false;
+            }
+            if(m_state->total < 0) {
+                // Unknown length: Qt treats this as a sequential device, so a real seek is not
+                // possible. Reading already follows our own offset.
+                return false;
+            }
+            if(pos == m_state->readPos) {
+                return true;
+            }
 
-            // Backward seek (target below what we've downloaded): fetch a margin behind the target so
-            // FFmpeg's backwards probe seeks are served from memory. Forward seek: start exactly at the
-            // target so the first decoded frame arrives without downloading a useless prefix.
-            const qint64 requestedStart = pos < bufferBase ? std::max<qint64>(0, pos - SeekBackMargin) : pos;
-            const qsizetype targetPos  = static_cast<qsizetype>(pos - requestedStart);
+            // Already on disk: just move. A background transfer may keep running.
+            if(m_state->cached.contains(pos) || pos == m_state->total) {
+                m_state->pendingRequest = false; // discard a seek that never got read
+                m_state->readPos        = pos;
+                QIODevice::seek(pos);
+                return true;
+            }
 
-            oldReply                  = m_state->reply;
+            // The running request is about to reach the target: let the read wait for it.
+            if(m_state->reply && m_state->willCover(pos) && m_state->writePos >= 0
+               && pos - m_state->writePos <= CoverWaitGap) {
+                m_state->readPos = pos;
+                QIODevice::seek(pos);
+                return true;
+            }
+
+            // Data is elsewhere in the file: stop the old transfer and fetch the target on the next
+            // read. FFmpeg often issues several seeks before reading; only the last one costs a request.
+            oldReply                = m_state->reply;
             m_state->reply.clear();
-            m_state->buffer.clear();
-            m_state->readPos          = targetPos;
-            m_state->bufferBase       = requestedStart;
-            m_state->skip             = 0;
-            m_state->requestedStart   = requestedStart;
-            m_state->headersProcessed = false;
-            m_state->status           = 0;
+            ++m_state->requestSequence;
+            m_state->requestPosted    = false;
             m_state->pendingRequest   = true;
-            m_state->skipTo           = -1;
-            m_state->finished         = false;
+            m_state->pendingStart     = pos;
+            m_state->requestedStart   = pos;
+            m_state->activeLimit      = -1;
+            m_state->headersProcessed = false;
+            m_state->writePos         = -1;
+            m_state->responseStart    = -1;
+            m_state->attempts         = 0;
+            m_state->streamEnded      = false;
             m_state->error.clear();
+            m_state->readPos          = pos;
         }
         m_state->ready.notify_all();
 
@@ -475,10 +617,10 @@ public:
             });
         }
 
-        // Don't start the request here: FFmpeg may issue several seeks before reading, and the backward
-        // margin above collapses its backwards probes into memory. The request starts on the next read.
-        resetBuffer();
-        return QIODevice::seek(pos);
+        qCDebug(SUBSONIC) << "stream" << m_id << "seek" << pos << "will fetch on next read" << "t"
+                          << m_clock.elapsed();
+        QIODevice::seek(pos);
+        return true;
     }
 
 protected:
@@ -493,106 +635,136 @@ protected:
         }
 
         std::unique_lock lock{m_state->mutex};
+        if(m_state->aborted) {
+            return -1;
+        }
+
         if(m_state->pendingRequest) {
+            // Use the same pre-roll as a normal read. FFmpeg probes backwards for the frame
+            // boundary after a seek; without this margin every probe became a new HTTP request and
+            // cancelled the previous one.
+            const qint64 target = m_state->pendingStart;
             m_state->pendingRequest = false;
-            const qint64 start      = m_state->requestedStart;
+            const qint64 from = planReadStart(target);
+            const qint64 to   = planReadEnd(from);
             lock.unlock();
-            startRequest(start);
+            startTransfer(from, to, false);
             lock.lock();
         }
 
-        const std::stop_token token = m_state->token;
-        const auto readable         = [this] {
-            if(m_state->skipTo >= 0) {
-                return m_state->bufferBase + m_state->buffer.size() >= m_state->skipTo || m_state->finished
-                    || m_state->aborted || !m_state->error.isEmpty();
-            }
-            return m_state->buffered() > 0 || m_state->finished || m_state->aborted || !m_state->error.isEmpty();
-        };
         QElapsedTimer stall;
         stall.start();
-        bool ready{true};
-        if(m_state->nonBlocking) {
-            ready = m_state->ready.wait_for(lock, token, std::chrono::milliseconds{50}, readable);
-        }
-        else {
-            m_state->ready.wait(lock, token, readable);
-        }
         m_state->readWouldBlock = false;
-        if(stall.elapsed() >= 200) {
-            qCDebug(SUBSONIC) << "stream" << m_id << "read stalled" << stall.elapsed() << "ms at" << QIODevice::pos()
-                              << "buffered" << m_state->buffered() << "base" << m_state->bufferBase << "skipTo"
-                              << m_state->skipTo << "finished" << m_state->finished << "t" << m_clock.elapsed();
-        }
 
-        if(token.stop_requested()) {
-            qCDebug(SUBSONIC) << "stream" << m_id << "read aborted by stop token at" << QIODevice::pos();
-            return -1;
-        }
-        if(!ready) {
-            m_state->readWouldBlock = true;
-            const qint64 now         = m_clock.elapsed();
-            if(now - m_lastWouldBlockLog >= 1000) {
-                m_lastWouldBlockLog = now;
-                qCDebug(SUBSONIC) << "stream" << m_id << "read would-block at" << QIODevice::pos() << "buffered"
-                                  << m_state->buffered() << "t" << now;
-            }
-            return -1;
-        }
-        if(m_state->skipTo >= 0) {
-            const qint64 end = m_state->bufferBase + m_state->buffer.size();
-            if(end < m_state->skipTo) {
-                // The transfer ended before reaching the seek target: fail rather than serve the wrong
-                // bytes from the old position.
-                const qint64 target = m_state->skipTo;
-                m_state->skipTo     = -1;
-                lock.unlock();
-                qCWarning(SUBSONIC) << "stream" << m_id << "ended" << target - end << "bytes short of seek target"
-                                    << target;
-                setErrorString(QStringLiteral("Stream ended before the seek target."));
+        while(true) {
+            if(m_state->aborted) {
                 return -1;
             }
-            m_state->readPos = static_cast<qsizetype>(m_state->skipTo - m_state->bufferBase);
-            m_state->skipTo  = -1;
-        }
-        if(!m_state->error.isEmpty()) {
-            const QString error = m_state->error;
-            lock.unlock();
-            setErrorString(error);
-            return -1;
-        }
-        if(m_state->buffered() <= 0) {
-            return 0;
-        }
 
-        const qsizetype count = std::min<qsizetype>(m_state->buffered(), maxSize);
-        std::memcpy(data, m_state->buffer.constData() + m_state->readPos, count);
-        m_state->readPos += count;
-        logReadRate(count);
+            const qint64 pos      = m_state->readPos;
+            const qint64 rangeEnd = m_state->cached.rangeEnd(pos);
+            if(rangeEnd > pos) {
+                const qint64 count = std::min<qint64>(maxSize, rangeEnd - pos);
+                if(!m_state->cache.seek(pos)) {
+                    const QString error = m_state->cache.errorString();
+                    lock.unlock();
+                    setErrorString(QStringLiteral("Could not read the stream cache: %1").arg(error));
+                    return -1;
+                }
+                const qint64 read = m_state->cache.read(data, count);
+                if(read <= 0) {
+                    const QString error = m_state->cache.errorString();
+                    lock.unlock();
+                    setErrorString(QStringLiteral("Could not read the stream cache: %1").arg(error));
+                    return -1;
+                }
+                m_state->readWouldBlock = false;
+                m_state->readPos += read;
+                logReadRate(read);
+                lock.unlock();
+                // Keep filling holes behind/ahead while the decoder is reading cached data. Without
+                // this, a hole left by a seek would only be retried when another transfer ends.
+                fillNextGap(true);
+                return read;
+            }
 
-        const QPointer<QNetworkReply> reply = m_state->reply;
-        lock.unlock();
+            if(m_state->total >= 0 && pos >= m_state->total) {
+                return 0;
+            }
+            if(!m_state->error.isEmpty()) {
+                const QString error = m_state->error;
+                lock.unlock();
+                setErrorString(error);
+                return -1;
+            }
+            if(m_state->streamEnded) {
+                if(m_state->total < 0 || pos >= m_state->writePos) {
+                    return 0;
+                }
+                const QString error = QStringLiteral("Stream ended before the requested position.");
+                lock.unlock();
+                setErrorString(error);
+                return -1;
+            }
 
-        // Pull data QNAM buffered but hasn't signalled yet.
-        if(reply) {
-            QMetaObject::invokeMethod(
-                m_network.get(),
-                [state = m_state, reply] {
-                    if(!reply) {
-                        return;
+            bool start{false};
+            if(!m_state->reply && !m_state->requestPosted) {
+                start = true;
+            }
+            else if(m_state->reply && m_state->headersProcessed && !m_state->willCover(pos)) {
+                // A transfer for another part of the file is running. Abandon it and fetch this
+                // position; everything already written stays cached.
+                start = true;
+            }
+
+            if(start) {
+                const qint64 from = planReadStart(pos);
+                const qint64 to   = planReadEnd(from);
+                lock.unlock();
+                startTransfer(from, to, false);
+                lock.lock();
+                continue;
+            }
+
+            const auto readable = [this, pos] {
+                return m_state->pendingRequest || m_state->cached.contains(pos)
+                    || (m_state->total >= 0 && pos >= m_state->total) || !m_state->error.isEmpty()
+                    || m_state->aborted || m_state->streamEnded;
+            };
+
+            m_state->waitingPos = pos;
+            if(m_state->nonBlocking) {
+                if(!m_state->ready.wait_for(lock, m_state->token, std::chrono::milliseconds{50}, readable)) {
+                    m_state->waitingPos = -1;
+                    if(m_state->token.stop_requested()) {
+                        return -1;
                     }
-                    {
-                        const std::scoped_lock appendLock{state->mutex};
-                        if(reply == state->reply && !state->aborted) {
-                            state->appendFromReply(reply);
-                        }
+                    m_state->readWouldBlock = true;
+                    const qint64 now        = m_clock.elapsed();
+                    if(now - m_lastWouldBlockLog >= 1000) {
+                        m_lastWouldBlockLog = now;
+                        qCDebug(SUBSONIC) << "stream" << m_id << "read would-block at" << pos << "cached"
+                                          << m_state->cached.contiguousBytes(pos) << "t" << now;
                     }
-                    state->ready.notify_all();
-                },
-                Qt::QueuedConnection);
-        }
+                    return -1;
+                }
+                m_state->waitingPos = -1;
+            }
+            else {
+                m_state->ready.wait(lock, m_state->token, readable);
+                m_state->waitingPos = -1;
+                if(m_state->token.stop_requested()) {
+                    qCDebug(SUBSONIC) << "stream" << m_id << "read aborted by stop token at" << pos;
+                    return -1;
+                }
+            }
 
-        return count;
+            if(stall.elapsed() >= 200) {
+                qCDebug(SUBSONIC) << "stream" << m_id << "read stalled" << stall.elapsed() << "ms at" << pos
+                                  << "cached" << m_state->cached.contiguousBytes(pos) << "t" << m_clock.elapsed();
+                stall.restart();
+            }
+        }
     }
 
     qint64 writeData(const char* /*data*/, qint64 /*maxSize*/) override
@@ -601,32 +773,47 @@ protected:
     }
 
 private:
-    //! Clears the seekbar band after a re-fetch; the new range is published as data arrives.
-    void resetBuffer()
+    //! Start of the range to fetch for a read at @p pos. Caller must hold the mutex.
+    [[nodiscard]] qint64 planReadStart(qint64 pos) const
     {
-        if(!m_monitor) {
-            return;
+        qint64 start = pos > SeekBackMargin ? pos - SeekBackMargin : 0;
+        const qint64 cachedEnd = m_state->cached.rangeEnd(start);
+        if(cachedEnd > start) {
+            start = cachedEnd;
         }
-        const auto monitor = m_monitor;
-        QMetaObject::invokeMethod(monitor.get(), [monitor] { monitor->reset(); }, Qt::QueuedConnection);
+        return std::min(start, pos);
     }
 
-    //! Publishes the downloaded range to the seekbar overlay. Bytes are used as fractions of the track;
-    //! for VBR streams that is an approximation, but it is the only progress the device has.
+    //! Exclusive end of the range to fetch for a read starting at @p start, bounded by cached data.
+    [[nodiscard]] qint64 planReadEnd(qint64 start) const
+    {
+        qint64 end = m_state->total;
+        for(const ByteRange& range : m_state->cached.ranges()) {
+            if(range.start > start) {
+                if(end < 0 || range.start < end) {
+                    end = range.start;
+                }
+                break;
+            }
+        }
+        if(end >= 0 && end <= start) {
+            end = m_state->total;
+        }
+        return end;
+    }
+
+    //! Publishes all cached ranges to the seekbar overlay. Bytes approximate VBR positions.
     void publishBuffer(bool force = false)
     {
         if(!m_monitor) {
             return;
         }
 
-        double start{0.0};
-        double last{0.0};
+        QVector<BufferRange> ranges;
         {
             const std::scoped_lock lock{m_state->mutex};
             const qint64 total = m_state->total;
-            const qint64 base  = m_state->bufferBase;
-            const qint64 end   = base + m_state->buffer.size();
-            if(total <= 0 || end <= base) {
+            if(total <= 0) {
                 return;
             }
 
@@ -638,74 +825,139 @@ private:
             }
             m_state->lastPublishMs = now;
 
-            start = std::clamp(static_cast<double>(base) / static_cast<double>(total), 0.0, 1.0);
-            last  = std::clamp(static_cast<double>(end) / static_cast<double>(total), 0.0, 1.0);
+            for(const ByteRange& range : m_state->cached.ranges()) {
+                const double start = std::clamp(static_cast<double>(range.start) / static_cast<double>(total), 0.0, 1.0);
+                const double end   = std::clamp(static_cast<double>(range.end) / static_cast<double>(total), 0.0, 1.0);
+                if(end > start) {
+                    ranges.append(BufferRange{start, end});
+                }
+            }
         }
 
         const auto monitor = m_monitor;
         QMetaObject::invokeMethod(
-            monitor.get(), [monitor, start, last] { monitor->setRange(start, last); }, Qt::QueuedConnection);
+            monitor.get(), [monitor, ranges] { monitor->setRanges(ranges); }, Qt::QueuedConnection);
     }
 
     //! One line per second while streaming: shows whether decoding continues (e.g. while paused).
-    void logReadRate(qsizetype count)
+    void logReadRate(qint64 count)
     {
         m_bytesRead += count;
         const qint64 now = m_clock.elapsed();
         if(now - m_lastRateLog < 1000) {
             return;
         }
-        qCDebug(SUBSONIC) << "stream" << m_id << "read rate" << m_bytesRead << "B/s at" << QIODevice::pos()
-                          << "buffered" << m_state->buffered() << "t" << now;
+        qCDebug(SUBSONIC) << "stream" << m_id << "read rate" << m_bytesRead << "B/s at" << m_state->readPos
+                          << "cached" << m_state->cached.contiguousBytes(m_state->readPos) << "t" << now;
         m_bytesRead   = 0;
         m_lastRateLog = now;
     }
 
-    void startRequest(qint64 rangeStart)
+    //! Starts a ranged transfer. @p end is exclusive; -1 means to the end of the file.
+    void startTransfer(qint64 start, qint64 end, bool retry)
     {
-        const QUrl url         = m_url;
-        const bool ignoreSsl   = m_ignoreSslErrors;
-        const auto state       = m_state;
-        const auto network     = m_network;
-        const qsizetype bufferBytes = m_bufferBytes;
+        const auto state = m_state;
+        QPointer<QNetworkReply> oldReply;
+        int sequence{0};
+        {
+            const std::scoped_lock lock{m_state->mutex};
+            if(m_state->aborted || !m_state->cache.isOpen()) {
+                return;
+            }
+            if(start < 0) {
+                start = 0;
+            }
+
+            // Never re-download a cached prefix.
+            const qint64 cachedEnd = m_state->cached.rangeEnd(start);
+            if(cachedEnd > start) {
+                start = cachedEnd;
+            }
+            if(m_state->total >= 0 && start >= m_state->total) {
+                m_state->streamEnded = true;
+                return;
+            }
+
+            if(end < 0 || (m_state->total >= 0 && end > m_state->total)) {
+                end = m_state->total;
+            }
+            if(end >= 0 && end <= start) {
+                end = m_state->total;
+            }
+            if(end < 0) {
+                // Unknown total: bound the transfer at the next cached range so we never fetch the
+                // same tail twice after a seek.
+                for(const ByteRange& range : m_state->cached.ranges()) {
+                    if(range.start > start) {
+                        end = range.start;
+                        break;
+                    }
+                }
+            }
+
+            m_state->requestedStart   = start;
+            m_state->activeLimit      = end;
+            m_state->headersProcessed = false;
+            m_state->fullResponse     = false;
+            m_state->status           = 0;
+            m_state->writePos         = -1;
+            m_state->responseStart    = -1;
+            m_state->streamEnded      = false;
+            m_state->pendingRequest   = false;
+            m_state->requestPosted    = true;
+            sequence                  = ++m_state->requestSequence;
+            oldReply                  = m_state->reply;
+            m_state->reply.clear();
+            if(!retry) {
+                m_state->attempts = 0;
+            }
+            m_state->error.clear();
+        }
+
+        if(oldReply) {
+            QMetaObject::invokeMethod(m_network.get(), [oldReply] {
+                if(oldReply) {
+                    oldReply->abort();
+                    oldReply->deleteLater();
+                }
+            });
+        }
+
+        const QUrl url               = m_url;
+        const bool ignoreSsl         = m_ignoreSslErrors;
+        const auto network           = m_network;
         const QPointer<SubsonicStreamDevice> device{this};
+        const int id                 = m_id;
+        const int requestNo          = m_requests.fetch_add(1) + 1;
+        const qint64 openedAt        = m_clock.elapsed();
+        qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "range" << start << '-' << end << "t"
+                          << openedAt;
 
-        const int id          = m_id;
-        const int requestNo   = m_requests.fetch_add(1) + 1;
-        const qint64 openedAt = m_clock.elapsed();
-        qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "range" << rangeStart << "from readPos"
-                          << QIODevice::pos() << "t" << openedAt;
-
-        QMetaObject::invokeMethod(network.get(), [network, url, ignoreSsl, state, rangeStart, bufferBytes, device, id,
+        QMetaObject::invokeMethod(network.get(), [network, url, ignoreSsl, state, start, end, sequence, device, id,
                                                   requestNo, openedAt] {
-            qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "dispatched on network thread t"
-                              << openedAt;
+            {
+                const std::scoped_lock lock{state->mutex};
+                if(state->aborted || state->requestSequence != sequence) {
+                    return;
+                }
+            }
+
             QNetworkRequest request = makeNetworkRequest(
                 url, NetworkRequestOption::AlwaysNetwork | NetworkRequestOption::AcceptAny);
             request.setTransferTimeout(StreamIdleTimeoutMs);
-            if(rangeStart > 0) {
-                request.setRawHeader("Range", QByteArrayLiteral("bytes=") + QByteArray::number(rangeStart) + '-');
+            request.setPriority(QNetworkRequest::HighPriority);
+            QByteArray range = QByteArrayLiteral("bytes=") + QByteArray::number(start) + '-';
+            if(end >= 0) {
+                range += QByteArray::number(end - 1);
             }
+            request.setRawHeader("Range", range);
 
             QNetworkReply* reply = network->get(request);
-            reply->setReadBufferSize(bufferBytes);
+            reply->setReadBufferSize(0); // drain straight to the cache; no in-memory window
 
             if(ignoreSsl) {
                 QObject::connect(reply, &QNetworkReply::sslErrors, reply,
                                  [reply](const QList<QSslError>&) { reply->ignoreSslErrors(); });
-            }
-
-            {
-                const std::scoped_lock lock{state->mutex};
-                if(state->aborted) {
-                    reply->abort();
-                    reply->deleteLater();
-                    return;
-                }
-                if(state->reply && state->reply != reply) {
-                    qCDebug(SUBSONIC) << "stream" << id << "reply superseded by request" << requestNo;
-                }
-                state->reply = reply;
             }
 
             QObject::connect(reply, &QIODevice::readyRead, reply, [device, state, reply] {
@@ -734,66 +986,102 @@ private:
 
             QObject::connect(reply, &QNetworkReply::finished, reply, [device, state, reply, id, requestNo] {
                 qint64 retryFrom{-1};
+                bool fillNext{false};
                 {
                     const std::scoped_lock lock{state->mutex};
                     if(reply == state->reply) {
                         state->updateHeaders(reply);
                         state->appendFromReply(reply);
+                        state->reply.clear();
+                        state->requestPosted = false;
+
                         if(!state->aborted) {
-                            if(reply->error() != QNetworkReply::NoError && state->attempts < MaxStreamRetries) {
-                                // Resume from where we got to instead of failing the whole track.
+                            const bool httpError = state->status >= 400;
+                            const bool hasError
+                                = httpError || reply->error() != QNetworkReply::NoError || !state->error.isEmpty();
+
+                            if(hasError && state->attempts < MaxStreamRetries) {
                                 ++state->attempts;
+                                retryFrom = state->writePos >= 0 ? state->writePos : state->requestedStart;
                                 qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "failed:"
-                                                  << reply->errorString() << "retry" << state->attempts;
-                                retryFrom               = state->bufferBase + state->buffer.size();
+                                                  << reply->errorString() << "retry" << state->attempts << "from"
+                                                  << retryFrom;
                                 state->error.clear(); // the retry replaces the failed transfer
                                 state->headersProcessed = false;
-                                state->requestedStart   = retryFrom;
-                                state->reply.clear();
+                                state->writePos         = -1;
+                            }
+                            else if(hasError) {
+                                if(state->error.isEmpty()) {
+                                    state->error = reply->errorString();
+                                }
+                                qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "gave up:"
+                                                  << state->error;
+                            }
+                            else if(state->total >= 0) {
+                                if(state->complete()) {
+                                    state->streamEnded = true;
+                                }
+                                else if(state->writePos <= state->responseStart) {
+                                    // A finished response that delivered no bytes would otherwise make
+                                    // the hole filler request the same range forever.
+                                    state->error = QStringLiteral("The server sent an empty stream range.");
+                                }
+                                else {
+                                    fillNext = true;
+                                }
                             }
                             else {
-                                if(reply->error() != QNetworkReply::NoError && state->error.isEmpty()) {
-                                    state->error = reply->errorString();
-                                    qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "gave up:"
-                                                      << state->error;
-                                }
-                                state->finished = true;
-                                state->reply.clear();
+                                // Chunked/transcoded response: EOF is the end of the stream.
+                                state->streamEnded = true;
                             }
                         }
                     }
                 }
                 state->ready.notify_all();
                 if(device) {
-                    device->publishBuffer();
+                    device->publishBuffer(true);
                 }
                 reply->deleteLater();
+
                 if(retryFrom >= 0 && device) {
                     device->scheduleRetry(retryFrom);
                 }
+                else if(fillNext && device) {
+                    device->fillNextGap();
+                }
             });
 
-            QObject::connect(reply, &QNetworkReply::errorOccurred, reply, [state, reply, id, requestNo](
-                                                                               QNetworkReply::NetworkError error) {
-                // Only logged: latching the error here made the retry path below unreachable, because the
-                // decoder thread woke on the non-empty error and failed the track before `finished` ran.
-                qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "error" << static_cast<int>(error)
-                                  << reply->errorString();
-                state->ready.notify_all();
-            });
+            QObject::connect(reply, &QNetworkReply::errorOccurred, reply,
+                             [state, reply, id, requestNo](QNetworkReply::NetworkError error) {
+                                 // Only logged: latching here would race the retry path in finished().
+                                 qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "error"
+                                                   << static_cast<int>(error) << reply->errorString();
+                                 state->ready.notify_all();
+                             });
+
+            {
+                const std::scoped_lock lock{state->mutex};
+                if(state->aborted || state->requestSequence != sequence) {
+                    reply->abort();
+                    reply->deleteLater();
+                    return;
+                }
+                state->reply = reply;
+                state->requestPosted = false;
+            }
+            state->ready.notify_all();
         });
     }
 
-    std::shared_ptr<NetworkAccessManager> m_network;
+    std::shared_ptr<QNetworkAccessManager> m_network;
     QUrl m_url;
     bool m_ignoreSslErrors;
-    qsizetype m_bufferBytes{DefaultBufferBytes};
     std::shared_ptr<SubsonicBufferMonitor> m_monitor;
     std::shared_ptr<StreamState> m_state;
     int m_id{nextDeviceId()};
     std::atomic<int> m_requests{0}; // touched from both the decoder and the network thread
     QElapsedTimer m_clock;
-    qsizetype m_bytesRead{0};
+    qint64 m_bytesRead{0};
     qint64 m_lastRateLog{-1000};
     qint64 m_lastWouldBlockLog{-1000};
 };
@@ -835,13 +1123,11 @@ public:
             }
         }
 
-        const bool ignoreSsl
+        const auto ignoreSsl
             = m_settings && m_settings->value(QStringLiteral("Subsonic/IgnoreSslErrors")).toBool();
-        const SubsonicSettings settings = loadSubsonicSettings(m_settings);
-        const qsizetype bufferBytes = static_cast<qsizetype>(settings.streamBufferMb) * 1024 * 1024;
 
         RemoteStreamSource source;
-        auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, bufferBytes, m_monitor);
+        auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, m_monitor);
         source.remoteDevice = device.get();
         source.device       = std::move(device);
         source.openTimeout  = std::chrono::milliseconds{8000};

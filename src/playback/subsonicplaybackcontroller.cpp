@@ -8,6 +8,7 @@
 
 #include "subsonicclient.h"
 #include "subsonicbufferbar.h"
+#include "subsonicnetwork.h"
 #include "subsonicsettings.h"
 #include "subsonicstreamutils.h"
 
@@ -197,8 +198,8 @@ void SubsonicPlaybackController::tryPrefetch()
     if(!m_player || m_pendingPrefetchId.isEmpty() || m_prefetchReply || !m_bufferMonitor) {
         return;
     }
-    // Only once the current track is fully downloaded, so the prefetch cannot slow its buffering.
-    if(m_bufferMonitor->end() < 0.999) {
+    // Only once the current track is fully cached, so the prefetch cannot slow its buffering.
+    if(!m_bufferMonitor->isComplete()) {
         return;
     }
     if(m_pendingPrefetchId == songIdForTrack(m_player->currentTrack())
@@ -234,10 +235,12 @@ void SubsonicPlaybackController::startPrefetch(const QString& songId)
         return;
     }
 
-    m_client->setSettings(loadSubsonicSettings(m_settings));
-    QNetworkRequest request{m_client->streamUrl(songId)};
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    m_client->setSettings(settings);
+    QNetworkRequest request = subsonicRequest(m_client->streamUrl(songId), 30000);
     request.setPriority(QNetworkRequest::LowPriority); // never let it compete with the playing track
     auto* reply = m_network->get(request);
+    applySslIgnore(reply, settings);
     m_prefetchReply = reply;
     m_prefetchId    = songId;
 

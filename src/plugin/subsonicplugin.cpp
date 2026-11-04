@@ -57,8 +57,7 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
 
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     qCInfo(SUBSONIC) << "settings: format" << settings.format << "maxBitRate" << settings.maxBitRate
-                     << "streamBufferMb" << settings.streamBufferMb << "remotePrebufferMs"
-                     << settings.remotePrebufferMs;
+                     << "remotePrebufferMs" << settings.remotePrebufferMs;
 }
 
 void SubsonicPlugin::initialise(const GuiPluginContext& context)

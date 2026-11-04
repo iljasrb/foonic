@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "subsonicfilter.h"
+
 #include <core/track.h>
 
 #include <QJsonArray>
@@ -17,14 +19,21 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <set>
 #include <vector>
 
+class QImage;
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QListWidgetItem;
+class QSplitter;
+class QStackedWidget;
+class QThreadPool;
 class QTimer;
 class QToolButton;
 class QTreeWidget;
@@ -37,6 +46,7 @@ class SettingsManager;
 
 namespace Subsonic {
 class SubsonicClient;
+class SubsonicDetailsPanel;
 class SubsonicLibraryDownloader;
 
 enum class BrowserAction : uint8_t
@@ -46,13 +56,8 @@ enum class BrowserAction : uint8_t
     PlayNext,
     AddToQueue,
     Download,
-};
-
-enum class MatchMode
-{
-    Contains = 0,
-    AllWords,
-    AnyWord,
+    AddToServerPlaylist,
+    CreateServerPlaylist,
 };
 
 enum class ArtistSort : uint8_t
@@ -109,6 +114,8 @@ private:
         int pending{0};
         bool finished{false};
         BrowserAction action{BrowserAction::Play};
+        QString playlistId;
+        QString playlistName;
     };
 
     void onExpanded(QTreeWidgetItem* item);
@@ -119,17 +126,24 @@ private:
     [[nodiscard]] TrackList tracksForDrag(const QList<QTreeWidgetItem*>& items);
     bool ensureDragData(const QList<QTreeWidgetItem*>& items);
     void cancelDragFetch();
+    [[nodiscard]] TrackList tracksForGridDrag(const QList<QListWidgetItem*>& items);
+    bool ensureGridDragData(const QList<QListWidgetItem*>& items);
+    void cancelGridDragFetch();
     void showContextMenu(const QPoint& pos);
     void showHeaderMenu(const QPoint& pos);
     void showDiscoveryMenu(const QPoint& pos);
     void showDiscoverySongs(const QString& title, const QJsonArray& songs);
     void showServerAlbumList(const QString& type, int offset = 0);
-    void createServerPlaylist(const QStringList& songIds);
-    void addSongsToServerPlaylist(const QString& id, const QStringList& songIds);
+    void createServerPlaylistFromSelection();
+    void addSongsToServerPlaylistFromSelection(const QString& id);
     void renameSelectedPlaylist(QTreeWidgetItem* item);
     void deleteSelectedPlaylist(QTreeWidgetItem* item);
     void removeSongsFromPlaylist(QTreeWidgetItem* item);
+    void clearServerPlaylist(QTreeWidgetItem* item);
     void playSelection(BrowserAction action);
+    void startRadio(QTreeWidgetItem* item);
+    void starSelection(bool star);
+    void rateSelection(int rating);
 
     void loadChildren(QTreeWidgetItem* item, int kind, const QString& id, std::function<void()> onDone = {},
                       bool expand = true);
@@ -140,28 +154,55 @@ private:
     void downloadToLibrary(const std::shared_ptr<GatherState>& state);
     void applyAction(const TrackList& tracks, BrowserAction action, bool startPlayback);
     [[nodiscard]] Track trackForSong(const QJsonObject& song, const QString& filepath) const;
-    [[nodiscard]] QString coverCachePath(const QString& coverArtId) const;
     [[nodiscard]] QString downloadedText(const QJsonObject& song) const;
     [[nodiscard]] QString albumSortLabel(AlbumSort mode) const;
     void clearFilter();
-    void updateDownloadedColumn();
+    void updateDownloadedItem(const QString& songId);
     void applyCover(QTreeWidgetItem* item, const QString& coverArtId);
     void requestCover(const QString& coverArtId);
+    void pumpCoverRequests();
+    void startCoverDownload(const QString& coverArtId);
+    void applyDecodedCover(const QString& coverArtId, const QImage& small, const QImage& grid);
+    void finishCover(const QString& coverArtId);
     void applyCoverToTree(const QString& coverArtId);
+    void applyCoverToGrid(const QString& coverArtId);
+    void unregisterItem(QTreeWidgetItem* item);
     void applyFilter();
     void clearTree();
     void rebuildArtistTree();
+    void addHomeHeader();
     void addPlaylistsHeader();
     void startPlaylistScan();
     void pumpPlaylistScan();
     void renderSearchView();
     void buildSearchTree(const QJsonObject& result);
-    QTreeWidgetItem* createResultHeader(const QString& title);
+    QTreeWidgetItem* createResultHeader(const QString& title, QTreeWidgetItem* parent = nullptr);
     QTreeWidgetItem* createPlaylistItem(QTreeWidgetItem* parent, const QJsonObject& playlist);
     QTreeWidgetItem* createArtistItem(const QJsonObject& artist, QTreeWidgetItem* parent = nullptr);
     QTreeWidgetItem* createAlbumItem(QTreeWidgetItem* parent, const QJsonObject& album);
     QTreeWidgetItem* createSongItem(QTreeWidgetItem* parent, const QJsonObject& song);
     void setStatus(const QString& text);
+
+    void updateDetails(QTreeWidgetItem* item);
+    void updateItemStar(QTreeWidgetItem* item, bool star);
+    void updateItemRating(QTreeWidgetItem* item, int rating);
+    void updateTreeItemJson(const QString& id, const QJsonObject& object);
+    void updateCachedJson(const QString& id, const QJsonObject& object);
+    void saveHeaderState();
+    void restoreHeaderState();
+
+    void setGridMode(bool enabled);
+    void loadGridAlbums(int offset = 0);
+    void populateGrid(const QJsonArray& albums, int offset);
+    void clearGrid();
+    void queueGridCovers();
+    void showGridContextMenu(const QPoint& pos);
+    void playGridAlbum(QListWidgetItem* item, BrowserAction action);
+    void addGridAlbumToServerPlaylist(QListWidgetItem* item, const QString& playlistId);
+    void createServerPlaylistFromGridAlbum(QListWidgetItem* item);
+    void updateGridDetails(QListWidgetItem* item);
+    void updateGridAlbumStar(QListWidgetItem* item, bool star);
+    void updateGridAlbumRating(QListWidgetItem* item, int rating);
 
     std::shared_ptr<NetworkAccessManager> m_network;
     PlaylistInteractor* m_interactor;
@@ -170,14 +211,22 @@ private:
     SubsonicClient* m_client;
     QLabel* m_status;
     QTreeWidget* m_tree;
+    QStackedWidget* m_stack;
+    QListWidget* m_grid;
+    QSplitter* m_splitter;
+    SubsonicDetailsPanel* m_details;
+    QToolButton* m_gridButton;
+    QToolButton* m_detailsButton;
     QLineEdit* m_filter{nullptr};
     QToolButton* m_filterOptions{nullptr};
     QTimer* m_filterTimer{nullptr};
+    QTimer* m_headerSaveTimer{nullptr};
     QString m_filterText;
     bool m_searchArtists{true};
     bool m_searchAlbums{true};
     bool m_searchSongs{true};
     bool m_searchPlaylists{true};
+    bool m_searchPlaylistTracks{false};
     MatchMode m_matchMode{MatchMode::Contains};
     ArtistSort m_artistSort{ArtistSort::ServerOrder};
     PlaylistSort m_playlistSort{PlaylistSort::ServerOrder};
@@ -187,13 +236,23 @@ private:
     QTreeWidgetItem* m_albumListMore{nullptr};
     int m_albumListLoaded{0};
     bool m_albumListLoading{false};
+    QTreeWidgetItem* m_homeHeader{nullptr};
     QTreeWidgetItem* m_playlistsHeader{nullptr};
+    QTreeWidgetItem* m_discoveryHeader{nullptr};
     std::map<QTreeWidgetItem*, std::vector<std::function<void()>>> m_pendingLoads;
     std::set<QTreeWidgetItem*> m_loading;
     mutable QHash<QString, QString> m_downloadedCache; // song id -> Downloaded column text
-    QList<QPair<QAction*, bool*>> m_scopeActions;      // search-scope actions and the flag they toggle
+    QHash<QString, QList<QTreeWidgetItem*>> m_itemsByCover;
+    QHash<QString, QList<QTreeWidgetItem*>> m_songItemsById;
+    QHash<QString, QList<QListWidgetItem*>> m_gridItemsByCover;
+    QList<QPair<QAction*, bool*>> m_scopeActions; // search-scope actions and the flag they toggle
     QList<QAction*> m_matchActions;
-    QSet<QString> m_coverRequests;
+    QSet<QString> m_coverPending;
+    std::deque<QString> m_coverQueue;
+    QThreadPool* m_coverPool{nullptr};
+    int m_coverActive{0};
+    int m_coverCacheActive{0};
+    int m_coverDecoding{0};
     QList<QJsonObject> m_artists;
     QList<QJsonObject> m_playlists;
     QHash<QString, QJsonArray> m_playlistEntries;
@@ -213,10 +272,17 @@ private:
     int m_treeGeneration{0};
     bool m_dragFetching{false};
     int m_dragFetchToken{0};
+    bool m_gridDragFetching{false};
+    int m_gridDragFetchToken{0};
     // Remembered across refresh: which items were expanded, and the scroll offset to restore.
     QSet<QString> m_expandedKeys;
     int m_pendingScroll{-1};
     QTimer* m_scrollRestoreTimer{nullptr};
+    // Album grid.
+    int m_gridLoaded{0};
+    bool m_gridLoading{false};
+    bool m_gridLoadedOnce{false};
+    bool m_gridMode{false};
 };
 } // namespace Subsonic
 } // namespace Fooyin

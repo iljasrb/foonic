@@ -9,6 +9,7 @@
 #include "subsonicbrowser.h"
 #include "subsonicsettings.h"
 
+#include <QCloseEvent>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -19,6 +20,7 @@ SubsonicDialog::SubsonicDialog(std::shared_ptr<NetworkAccessManager> network, Pl
                                SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
                                QWidget* parent)
     : QDialog{parent}
+    , m_settings{settings}
     , m_browser{new SubsonicBrowser{std::move(network), interactor, libraryDownloads, settings, this}}
 {
     setWindowTitle(tr("Foonic Browser"));
@@ -28,10 +30,21 @@ SubsonicDialog::SubsonicDialog(std::shared_ptr<NetworkAccessManager> network, Pl
     layout->setSpacing(6);
     layout->addWidget(m_browser);
 
-    resize(900, 600);
+    const QByteArray geometry = settings->value(u"Subsonic/DialogGeometry"_s).toByteArray();
+    if(geometry.isEmpty() || !restoreGeometry(geometry)) {
+        resize(900, 600);
+    }
 
     if(!loadSubsonicSettings(settings).isValid()) {
         QTimer::singleShot(0, this, [this] { m_browser->openSettings(); });
     }
+}
+
+void SubsonicDialog::closeEvent(QCloseEvent* event)
+{
+    if(m_settings) {
+        m_settings->set(u"Subsonic/DialogGeometry"_s, saveGeometry());
+    }
+    QDialog::closeEvent(event);
 }
 } // namespace Fooyin::Subsonic

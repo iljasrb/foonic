@@ -8,6 +8,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QVector>
 
 class QEvent;
 class QTimer;
@@ -17,9 +18,16 @@ namespace Fooyin {
 class SettingsManager;
 
 namespace Subsonic {
+//! Cached part of the current track, as fractions of the total duration.
+struct BufferRange
+{
+    double start{0.0};
+    double end{0.0};
+};
+
 /*!
- * Downloaded range of the current remote stream, as fractions of the track. Updated from the
- * decoder thread and read on the GUI thread.
+ * Downloaded ranges of the current remote stream, as fractions of the track. Updated from the
+ * decoder/network threads and read on the GUI thread.
  */
 class SubsonicBufferMonitor : public QObject
 {
@@ -29,8 +37,11 @@ public:
     explicit SubsonicBufferMonitor(QObject* parent = nullptr);
 
     void setRange(double start, double end);
+    void setRanges(const QVector<BufferRange>& ranges);
     void reset();
 
+    [[nodiscard]] QVector<BufferRange> ranges() const;
+    [[nodiscard]] bool isComplete() const;
     [[nodiscard]] double start() const;
     [[nodiscard]] double end() const;
 
@@ -38,17 +49,16 @@ Q_SIGNALS:
     void rangeChanged();
 
 private:
-    double m_start{-1.0};
-    double m_end{-1.0};
+    QVector<BufferRange> m_ranges;
 };
 
 class BufferOverlay;
 
 /*!
- * Paints the buffered range of the current Subsonic stream onto fooyin's seekbars.
+ * Paints the cached ranges of the current Subsonic stream onto fooyin's seekbars.
  *
  * fooyin's SeekBar has no public buffer hook, so this follows the layout at runtime, overlays a
- * transparent, mouse-transparent child on each TrackSlider and draws a muted band over its groove.
+ * transparent, mouse-transparent child on each TrackSlider and draws muted bands over its groove.
  */
 class SubsonicBufferBar : public QObject
 {

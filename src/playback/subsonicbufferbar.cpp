@@ -49,6 +49,33 @@ QStyleOptionSlider sliderOption(QSlider* slider)
         = slider->orientation() == Qt::Horizontal ? slider->invertedAppearance() : !slider->invertedAppearance();
     return opt;
 }
+
+QVector<BufferRange> sanitiseRanges(const QVector<BufferRange>& ranges)
+{
+    QVector<BufferRange> result;
+    result.reserve(ranges.size());
+    for(const BufferRange& range : ranges) {
+        const double start = std::clamp(range.start, 0.0, 1.0);
+        const double end   = std::clamp(range.end, 0.0, 1.0);
+        if(end > start) {
+            result.append(BufferRange{start, end});
+        }
+    }
+    return result;
+}
+
+bool sameStarts(const QVector<BufferRange>& lhs, const QVector<BufferRange>& rhs)
+{
+    if(lhs.size() != rhs.size()) {
+        return false;
+    }
+    for(qsizetype i{0}; i < lhs.size(); ++i) {
+        if(std::abs(lhs.at(i).start - rhs.at(i).start) > 0.000001) {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace
 
 class BufferOverlay : public QWidget
@@ -63,41 +90,60 @@ public:
         setFocusPolicy(Qt::NoFocus);
 
         // Exponential catch-up: each frame closes a quarter of the gap, so chunked download updates
-        // read as one smooth slide and the timer stops on its own once the band has caught up.
+        // read as one smooth slide and the timer stops on its own once the bands have caught up.
         m_animTimer->setInterval(16);
         connect(m_animTimer, &QTimer::timeout, this, [this] {
-            const double diff = m_targetEnd - m_displayEnd;
-            if(std::abs(diff) < 0.0005) {
-                m_displayEnd = m_targetEnd;
-                m_animTimer->stop();
+            bool caughtUp{true};
+            for(qsizetype i{0}; i < m_displayRanges.size() && i < m_targetRanges.size(); ++i) {
+                const double diff = m_targetRanges.at(i).end - m_displayRanges.at(i).end;
+                if(std::abs(diff) < 0.0005) {
+                    m_displayRanges[i].end = m_targetRanges.at(i).end;
+                }
+                else {
+                    m_displayRanges[i].end += diff * 0.25;
+                    caughtUp = false;
+                }
             }
-            else {
-                m_displayEnd += diff * 0.25;
+            if(caughtUp) {
+                m_animTimer->stop();
             }
             update();
         });
     }
 
-    //! Feeds a new buffered range. Growth is animated; shrink/seek/reset snaps.
-    void setRange(double start, double end)
+    //! Feeds the cached ranges. Growth is animated; a changed range layout snaps.
+    void setRanges(const QVector<BufferRange>& ranges)
     {
-        m_displayStart = start;
-        m_targetEnd    = end;
+        const QVector<BufferRange> clean = sanitiseRanges(ranges);
 
-        if(end <= start || m_displayEnd < 0.0 || end < m_displayEnd) {
-            m_displayEnd = end;
+        // A new hole or a merged range changes the layout; animating that would look like the band
+        // jumping around, so draw the exact state instead.
+        if(!sameStarts(m_displayRanges, clean) || m_displayRanges.size() != clean.size()) {
+            m_targetRanges  = clean;
+            m_displayRanges = clean;
             m_animTimer->stop();
             update();
             return;
         }
 
-        if(end > m_displayEnd && !m_animTimer->isActive()) {
-            m_animTimer->start();
+        m_targetRanges = clean;
+        for(qsizetype i{0}; i < m_targetRanges.size(); ++i) {
+            if(m_targetRanges.at(i).end < m_displayRanges.at(i).end) {
+                m_displayRanges[i].end = m_targetRanges.at(i).end;
+            }
+        }
+        if(!m_animTimer->isActive()) {
+            for(qsizetype i{0}; i < m_targetRanges.size(); ++i) {
+                if(m_targetRanges.at(i).end > m_displayRanges.at(i).end) {
+                    m_animTimer->start();
+                    break;
+                }
+            }
         }
         update();
     }
 
-    //! Hides the band without detaching the overlay (used by the settings toggle).
+    //! Hides the bands without detaching the overlay (used by the settings toggle).
     void setBandEnabled(bool enabled)
     {
         if(m_bandEnabled == enabled) {
@@ -110,18 +156,12 @@ public:
 protected:
     void paintEvent(QPaintEvent*) override
     {
-        if(!m_bandEnabled) {
+        if(!m_bandEnabled || m_displayRanges.isEmpty()) {
             return;
         }
 
         auto* slider = qobject_cast<QSlider*>(parentWidget());
         if(!slider || slider->maximum() <= slider->minimum()) {
-            return;
-        }
-
-        const double start = m_displayStart;
-        const double end   = m_displayEnd;
-        if(end <= start) {
             return;
         }
 
@@ -151,33 +191,12 @@ protected:
 
         const double valueFraction
             = (slider->sliderPosition() - opt.minimum) / double(opt.maximum - opt.minimum);
-        const double from = std::max(start, valueFraction);
-        if(end <= from) {
-            return; // nothing buffered ahead of the playhead
-        }
 
-        // Start after the handle when the buffer covers it, so the handle keeps its normal colour.
+        // Start after the handle when a band covers it, so the handle keeps its normal colour.
         const bool forward      = span > 0.0;
         const double handleEdge = horizontal ? (forward ? current.right() : current.left())
                                              : (forward ? current.bottom() : current.top());
         const auto toPixel      = [&](double fraction) { return origin + span * std::clamp(fraction, 0.0, 1.0); };
-        const double begin      = start <= valueFraction ? handleEdge : toPixel(from);
-        const double finish     = toPixel(end);
-        if(std::abs(finish - begin) < 1.0) {
-            return;
-        }
-
-        QRectF band;
-        // The groove rect includes style padding; a hair thinner keeps the band flush with the painted line.
-        const double thickness = std::max(1.0, (horizontal ? groove.height() : groove.width()) - 1.0);
-        if(horizontal) {
-            const double top = groove.top() + (groove.height() - thickness) / 2.0;
-            band = QRectF{std::min(begin, finish), top, std::abs(finish - begin), thickness};
-        }
-        else {
-            const double left = groove.left() + (groove.width() - thickness) / 2.0;
-            band = QRectF{left, std::min(begin, finish), thickness, std::abs(finish - begin)};
-        }
 
         // Text colour contrasts with the surrounding theme; low alpha keeps it a hint, not a widget.
         QColor colour = slider->palette().color(QPalette::WindowText);
@@ -187,16 +206,45 @@ protected:
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Qt::NoPen);
         painter.setBrush(colour);
-        const double radius = std::min(band.width(), band.height()) / 2.0;
-        painter.drawRoundedRect(band, radius, radius);
+
+        // The groove rect includes style padding; a hair thinner keeps the bands flush with the line.
+        const double thickness = std::max(1.0, (horizontal ? groove.height() : groove.width()) - 1.0);
+
+        for(const BufferRange& range : std::as_const(m_displayRanges)) {
+            if(range.end <= valueFraction) {
+                continue; // behind the playhead; the normal progress fill already covers it
+            }
+            const double from = std::max(range.start, valueFraction);
+            if(range.end <= from) {
+                continue;
+            }
+
+            const double begin  = range.start <= valueFraction ? handleEdge : toPixel(from);
+            const double finish = toPixel(range.end);
+            if(std::abs(finish - begin) < 1.0) {
+                continue;
+            }
+
+            QRectF band;
+            if(horizontal) {
+                const double top = groove.top() + (groove.height() - thickness) / 2.0;
+                band = QRectF{std::min(begin, finish), top, std::abs(finish - begin), thickness};
+            }
+            else {
+                const double left = groove.left() + (groove.width() - thickness) / 2.0;
+                band = QRectF{left, std::min(begin, finish), thickness, std::abs(finish - begin)};
+            }
+
+            const double radius = std::min(band.width(), band.height()) / 2.0;
+            painter.drawRoundedRect(band, radius, radius);
+        }
     }
 
 private:
     QTimer* m_animTimer;
     bool m_bandEnabled{true};
-    double m_targetEnd{-1.0};
-    double m_displayStart{-1.0};
-    double m_displayEnd{-1.0};
+    QVector<BufferRange> m_targetRanges;
+    QVector<BufferRange> m_displayRanges;
 };
 
 SubsonicBufferMonitor::SubsonicBufferMonitor(QObject* parent)
@@ -209,32 +257,61 @@ void SubsonicBufferMonitor::setRange(double start, double end)
         reset();
         return;
     }
-    if(qFuzzyCompare(m_start, start) && qFuzzyCompare(m_end, end)) {
+    setRanges(QVector<BufferRange>{BufferRange{start, end}});
+}
+
+void SubsonicBufferMonitor::setRanges(const QVector<BufferRange>& ranges)
+{
+    const QVector<BufferRange> clean = sanitiseRanges(ranges);
+    if(clean.size() == m_ranges.size()) {
+        bool same{true};
+        for(qsizetype i{0}; i < clean.size(); ++i) {
+            if(std::abs(clean.at(i).start - m_ranges.at(i).start) > 0.000001
+               || std::abs(clean.at(i).end - m_ranges.at(i).end) > 0.000001) {
+                same = false;
+                break;
+            }
+        }
+        if(same) {
+            return;
+        }
+    }
+    if(clean.isEmpty() && m_ranges.isEmpty()) {
         return;
     }
-    m_start = start;
-    m_end   = end;
+
+    m_ranges = clean;
     Q_EMIT rangeChanged();
 }
 
 void SubsonicBufferMonitor::reset()
 {
-    if(m_end < 0.0) {
+    if(m_ranges.isEmpty()) {
         return;
     }
-    m_start = -1.0;
-    m_end   = -1.0;
+    m_ranges.clear();
     Q_EMIT rangeChanged();
+}
+
+QVector<BufferRange> SubsonicBufferMonitor::ranges() const
+{
+    return m_ranges;
+}
+
+bool SubsonicBufferMonitor::isComplete() const
+{
+    return m_ranges.size() == 1 && m_ranges.first().start <= 0.000001
+        && m_ranges.first().end >= 0.999999;
 }
 
 double SubsonicBufferMonitor::start() const
 {
-    return m_start;
+    return m_ranges.isEmpty() ? -1.0 : m_ranges.first().start;
 }
 
 double SubsonicBufferMonitor::end() const
 {
-    return m_end;
+    return m_ranges.isEmpty() ? -1.0 : m_ranges.last().end;
 }
 
 SubsonicBufferBar::SubsonicBufferBar(SettingsManager* settings, SubsonicBufferMonitor* monitor, QObject* parent)
@@ -297,7 +374,7 @@ void SubsonicBufferBar::updateOverlays()
     const bool on = enabled();
     for(BufferOverlay* overlay : std::as_const(m_overlays)) {
         overlay->setBandEnabled(on);
-        overlay->setRange(m_monitor->start(), m_monitor->end());
+        overlay->setRanges(m_monitor->ranges());
     }
 }
 
@@ -330,7 +407,7 @@ void SubsonicBufferBar::scan()
         auto* overlay = new BufferOverlay{slider};
         m_overlays.insert(slider, overlay);
         overlay->setBandEnabled(enabled());
-        overlay->setRange(m_monitor->start(), m_monitor->end());
+        overlay->setRanges(m_monitor->ranges());
         slider->installEventFilter(this);
         connect(slider, &QAbstractSlider::valueChanged, overlay, qOverload<>(&QWidget::update));
         connect(slider, &QObject::destroyed, this, [this, slider] { m_overlays.remove(slider); });

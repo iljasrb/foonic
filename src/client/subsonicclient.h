@@ -8,15 +8,19 @@
 
 #include "subsonicsettings.h"
 
+#include <QByteArray>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
+#include <QSet>
 #include <QUrl>
 #include <QUrlQuery>
 
 #include <functional>
 #include <memory>
+
+class QNetworkReply;
 
 namespace Fooyin {
 class NetworkAccessManager;
@@ -50,15 +54,30 @@ public:
     //! Reports a now-playing (@p submission false) or completed-play (@p submission true) event.
     void scrobble(const QString& id, bool submission);
 
-    //! Star/unstar a song, album or artist by id.
-    void star(const QString& id, bool star);
+    //! Star/unstar a song, album or artist by id. @p idParam is `id`, `albumId` or `artistId`.
+    void star(const QString& id, bool star, const QString& idParam = QStringLiteral("id"));
+    //! Sets a 1-5 star rating (0 clears it) on a song, album or artist.
+    void setRating(const QString& id, int rating);
 
     //! Starred songs across artists/albums/songs.
     void getStarred(ArrayCallback callback);
+    //! The complete `starred2` object (artist/album/song arrays).
+    void getStarred2(ObjectCallback callback);
     /*! Album list: type = newest, recent, frequent, starred, highest, random,
      *  alphabeticalByName, alphabeticalByArtist, byYear, byGenre. */
     void getAlbumList2(const QString& type, ArrayCallback callback, int size = 100, int offset = 0);
     void getRandomSongs(ArrayCallback callback, int count = 50);
+    void getGenres(ArrayCallback callback);
+    void getSongsByGenre(const QString& genre, ArrayCallback callback, int count = 100, int offset = 0);
+    void getArtistInfo2(const QString& id, ObjectCallback callback);
+    void getAlbumInfo2(const QString& id, ObjectCallback callback);
+    void getSimilarSongs2(const QString& id, ArrayCallback callback, int count = 50);
+    void getTopSongs(const QString& artist, ArrayCallback callback, int count = 50);
+    void getLyrics(const QString& artist, const QString& title, ObjectCallback callback);
+    void getLyricsBySongId(const QString& id, ObjectCallback callback);
+    //! Queries the server's OpenSubsonic extensions and caches their names.
+    void getOpenSubsonicExtensions(ArrayCallback callback);
+    [[nodiscard]] bool supportsFormPost() const;
 
     void createPlaylist(const QString& name, const QStringList& songIds, ResultCallback callback);
     void renamePlaylist(const QString& id, const QString& name, ResultCallback callback);
@@ -67,17 +86,25 @@ public:
     void removeFromPlaylist(const QString& id, QList<int> indexes, ResultCallback callback);
     void deletePlaylist(const QString& id, ResultCallback callback);
 
+    //! The original file, without transcoding. Used for library downloads.
+    [[nodiscard]] QUrl downloadUrl(const QString& id) const;
+    //! The original file through the stream endpoint (fallback for servers without `download`).
+    [[nodiscard]] QUrl originalStreamUrl(const QString& id) const;
     [[nodiscard]] QUrl streamUrl(const QString& id) const;
     [[nodiscard]] QUrl coverArtUrl(const QString& id, int size = 300) const;
 
 private:
     using ResponseCallback = std::function<void(const QJsonObject& response, const QString& error)>;
 
-    void get(const QString& method, const QUrlQuery& query, ResponseCallback callback);
-    [[nodiscard]] QUrl buildUrl(const QString& method, QUrlQuery query) const;
+    void get(const QString& method, const QUrlQuery& query, ResponseCallback callback, int attempt = 0);
+    void post(const QString& method, const QUrlQuery& query, ResponseCallback callback);
+    void send(const QString& method, const QUrlQuery& query, const QByteArray& body, ResponseCallback callback,
+              int attempt = 0);
+    void updatePlaylist(const QUrlQuery& query, ResultCallback callback);
 
     std::shared_ptr<NetworkAccessManager> m_network;
     SubsonicSettings m_settings;
+    QSet<QString> m_extensions;
 };
 } // namespace Subsonic
 } // namespace Fooyin

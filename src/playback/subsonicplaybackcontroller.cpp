@@ -346,8 +346,15 @@ void SubsonicPlaybackController::startPrefetchRequest()
         end   = gap->end;
     }
     else {
+        // Unknown total: fill the first hole before the high-water mark, otherwise append.
         const auto ranges = m_prefetchEntry->rangeList();
-        start             = ranges.empty() ? 0 : ranges.back().end;
+        start             = 0;
+        for(const ByteRange& range : ranges) {
+            if(range.start > start) {
+                break;
+            }
+            start = std::max(start, range.end);
+        }
     }
 
     m_prefetchRequestedStart = start;

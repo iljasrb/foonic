@@ -6,6 +6,11 @@
  * Self-check for the Subsonic URL/Content-Range parsing used to make remote streams seekable.
  */
 
+// Keep assertions active in Release builds; CI configures the tests with -DNDEBUG.
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
 #include "subsonicstreamutils.h"
 
 #include <cassert>

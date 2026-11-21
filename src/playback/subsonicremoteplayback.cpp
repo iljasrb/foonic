@@ -22,7 +22,6 @@
 
 #include <QByteArray>
 #include <QElapsedTimer>
-#include <QFile>
 #include <QIODevice>
 #include <QMetaObject>
 #include <QNetworkAccessManager>
@@ -707,11 +706,7 @@ protected:
         if(maxSize <= 0) {
             return 0;
         }
-        if(QThread::currentThread() == m_network->thread()) {
-            setErrorString(QStringLiteral("Subsonic stream cannot be read from the network thread."));
-            return -1;
-        }
-
+        const bool networkThread = QThread::currentThread() == m_network->thread();
         std::unique_lock lock{m_state->mutex};
         if(m_state->aborted) {
             return -1;
@@ -777,6 +772,12 @@ protected:
                 const QString error = QStringLiteral("Stream ended before the requested position.");
                 lock.unlock();
                 setErrorString(error);
+                return -1;
+            }
+            if(networkThread) {
+                // Never block the thread that delivers the network callbacks. Cached bytes above
+                // are still readable, so probes of a fully cached track work.
+                m_state->readWouldBlock = true;
                 return -1;
             }
 
@@ -1191,19 +1192,6 @@ private:
     qint64 m_lastWouldBlockLog{-1000};
 };
 
-//! Serves a fully cached track directly from disk while keeping its cache entry alive.
-class CachedFileDevice : public QFile
-{
-public:
-    CachedFileDevice(const QString& path, std::shared_ptr<CacheEntry> entry)
-        : QFile{path}
-        , m_entry{std::move(entry)}
-    { }
-
-private:
-    std::shared_ptr<CacheEntry> m_entry;
-};
-
 class SubsonicRemoteSourceProvider : public RemoteSourceProvider
 {
 public:
@@ -1231,24 +1219,15 @@ public:
         }
 
         const bool complete = cacheEntry->complete();
-        RemoteStreamSource source;
-
-        if(complete) {
-            auto file = std::make_unique<CachedFileDevice>(cacheEntry->path(), std::move(cacheEntry));
-            if(file->open(QIODevice::ReadOnly)) {
-                source.device      = std::move(file);
-                source.openTimeout = std::chrono::milliseconds{0};
-                return source;
-            }
-        }
-
         const auto ignoreSsl
             = m_settings && m_settings->value(QStringLiteral("Subsonic/IgnoreSslErrors")).toBool();
+
+        RemoteStreamSource source;
         auto device = std::make_unique<SubsonicStreamDevice>(m_network, url, ignoreSsl, m_monitor,
                                                              std::move(cacheEntry));
         source.remoteDevice = device.get();
         source.device       = std::move(device);
-        source.openTimeout  = std::chrono::milliseconds{8000};
+        source.openTimeout  = complete ? std::chrono::milliseconds{0} : std::chrono::milliseconds{8000};
         return source;
     }
 

@@ -56,6 +56,7 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
         // If the prefetched track is now playing, keep its partial cache: the stream device picks
         // it up and continues from the first hole instead of starting the download again.
         const bool promoted = !m_prefetchId.isEmpty() && m_prefetchId == newId;
+        qCDebug(SUBSONIC) << "current track" << newId << "prefetch" << m_prefetchId << "promoted" << promoted;
 
         m_currentId = newId;
         m_nextId.clear();
@@ -80,6 +81,7 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
                 const QUrl url{upcoming.track.track.filepath()};
                 const QString nextId
                     = isSubsonicStreamUrl(url) ? QUrlQuery{url}.queryItemValue(u"id"_s) : QString{};
+                qCDebug(SUBSONIC) << "upcoming track" << nextId << "previous" << m_nextId;
 
                 if(nextId == m_nextId) {
                     tryPrefetch();

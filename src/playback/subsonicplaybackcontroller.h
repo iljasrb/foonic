@@ -52,7 +52,7 @@ private:
     void updatePinnedTracks();
     [[nodiscard]] bool hasComfortableLead() const;
     void tryPrefetch();
-    void startPrefetch(const QString& songId);
+    void startPrefetch(const QString& songId, bool probe);
     void startPrefetchRequest();
     void readPrefetchReply(QNetworkReply* reply);
     void updatePrefetchHeaders(QNetworkReply* reply);
@@ -87,15 +87,21 @@ private:
     std::shared_ptr<CacheEntry> m_prefetchEntry;
     QString m_prefetchId;
     QString m_prefetchFailedId;
+    bool m_prefetchProbe{false};
     int m_prefetchAttempts{0};
     int m_prefetchGeneration{0};
     qint64 m_prefetchRequestedStart{-1};
     qint64 m_prefetchActiveLimit{-1};
     qint64 m_prefetchWritePos{-1};
     qint64 m_prefetchResponseStart{-1};
+    qint64 m_prefetchResponseEnd{-1};
     qint64 m_prefetchTotal{-1};
     bool m_prefetchHeaders{false};
     bool m_prefetchFullResponse{false};
+    bool m_prefetchOpenEnded{false};
+    bool m_prefetchEstimateTotal{false};
+    bool m_prefetchFatalError{false};
+    bool m_prefetchEof{false};
     QString m_prefetchError;
 };
 } // namespace Subsonic

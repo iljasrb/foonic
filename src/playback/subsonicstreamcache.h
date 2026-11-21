@@ -200,6 +200,7 @@ public:
         return m_total;
     }
 
+    //! Sets an authoritative size and trims anything beyond it.
     void setTotal(qint64 total)
     {
         if(total < 0) {
@@ -208,6 +209,19 @@ public:
         const std::scoped_lock lock{m_mutex};
         m_total = total;
         m_ranges.trim(total);
+        touchLocked();
+    }
+
+    //! Sets a size from estimateContentLength without shrinking or trimming known data.
+    void setEstimatedTotal(qint64 total)
+    {
+        if(total < 0) {
+            return;
+        }
+        const std::scoped_lock lock{m_mutex};
+        if(m_total < 0 || total > m_total) {
+            m_total = total;
+        }
         touchLocked();
     }
 

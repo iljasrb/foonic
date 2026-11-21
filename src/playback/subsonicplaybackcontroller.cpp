@@ -14,6 +14,7 @@
 
 #include <core/engine/fadingdefs.h>
 #include <core/network/networkaccessmanager.h>
+#include <core/network/networkutils.h>
 #include <core/player/playercontroller.h>
 #include <core/track.h>
 
@@ -30,6 +31,10 @@
 using namespace Qt::StringLiterals;
 
 namespace Fooyin::Subsonic {
+namespace {
+constexpr qint64 PrefetchProbeBytes = 1LL * 1024 * 1024;
+}
+
 SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAccessManager> network,
                                                        SettingsManager* settings, PlayerController* player,
                                                        std::shared_ptr<SubsonicBufferMonitor> bufferMonitor,
@@ -288,11 +293,16 @@ void SubsonicPlaybackController::tryPrefetch()
     if(!m_player || !m_cache || m_nextId.isEmpty() || !m_prefetchId.isEmpty() || m_prefetchReply) {
         return;
     }
-    if(m_nextId == m_currentId || m_prefetchFailedId == m_nextId) {
+    if(m_nextId == m_currentId) {
         return;
     }
-    if(!hasComfortableLead()) {
-        return;
+
+    const bool comfortableLead = hasComfortableLead();
+    if(m_prefetchFailedId == m_nextId) {
+        if(!comfortableLead) {
+            return;
+        }
+        m_prefetchFailedId.clear(); // a probe may have failed; full prefetch can still work
     }
 
     const auto existing = m_cache->find(m_nextId);
@@ -300,10 +310,19 @@ void SubsonicPlaybackController::tryPrefetch()
         return;
     }
 
-    startPrefetch(m_nextId);
+    if(!comfortableLead) {
+        // Fetch just the first megabyte at low priority even while the current track is still
+        // buffering. It gives the next track a warm decoder probe and instant first audio.
+        if(!existing || existing->rangeList().empty()) {
+            startPrefetch(m_nextId, true);
+        }
+        return;
+    }
+
+    startPrefetch(m_nextId, false);
 }
 
-void SubsonicPlaybackController::startPrefetch(const QString& songId)
+void SubsonicPlaybackController::startPrefetch(const QString& songId, bool probe)
 {
     if(!m_cache || songId.isEmpty() || !m_prefetchId.isEmpty() || m_prefetchReply) {
         return;
@@ -316,6 +335,7 @@ void SubsonicPlaybackController::startPrefetch(const QString& songId)
 
     m_prefetchEntry    = std::move(entry);
     m_prefetchId       = songId;
+    m_prefetchProbe    = probe;
     m_prefetchAttempts = 0;
     m_prefetchError.clear();
     ++m_prefetchGeneration;
@@ -357,24 +377,37 @@ void SubsonicPlaybackController::startPrefetchRequest()
         }
     }
 
+    if(m_prefetchProbe) {
+        end = end >= 0 ? std::min(end, start + PrefetchProbeBytes) : start + PrefetchProbeBytes;
+    }
+
     m_prefetchRequestedStart = start;
     m_prefetchActiveLimit    = end;
     m_prefetchWritePos       = -1;
     m_prefetchResponseStart  = -1;
+    m_prefetchResponseEnd    = -1;
     m_prefetchTotal          = m_prefetchEntry->total();
     m_prefetchHeaders        = false;
     m_prefetchFullResponse   = false;
+    m_prefetchOpenEnded      = end < 0 || (m_prefetchTotal >= 0 && end == m_prefetchTotal);
+    m_prefetchFatalError     = false;
+    m_prefetchEof            = false;
     m_prefetchError.clear();
 
     const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     m_client->setSettings(settings);
 
-    QNetworkRequest request{m_client->streamUrl(m_prefetchId)};
+    const QUrl streamUrl = m_client->streamUrl(m_prefetchId);
+    m_prefetchEstimateTotal
+        = QUrlQuery{streamUrl}.queryItemValue(u"estimateContentLength"_s) == u"true"_s;
+
+    QNetworkRequest request = makeNetworkRequest(
+        streamUrl, NetworkRequestOption::AlwaysNetwork | NetworkRequestOption::AcceptAny);
     request.setTransferTimeout(30000);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setRawHeader("Accept-Encoding", "identity");
     request.setPriority(QNetworkRequest::LowPriority); // never let it compete with the playing track
     QByteArray range = QByteArrayLiteral("bytes=") + QByteArray::number(start) + '-';
-    if(end >= 0) {
+    if(!m_prefetchOpenEnded && end >= 0) {
         range += QByteArray::number(end - 1);
     }
     request.setRawHeader("Range", range);
@@ -410,18 +443,35 @@ void SubsonicPlaybackController::updatePrefetchHeaders(QNetworkReply* reply)
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     qint64 responseOffset = m_prefetchRequestedStart >= 0 ? m_prefetchRequestedStart : 0;
 
+    const QByteArray contentType = reply->rawHeader("Content-Type").toLower().trimmed();
+    const bool errorDocument = contentType.startsWith("text/xml") || contentType.startsWith("application/xml")
+        || contentType.startsWith("application/json") || contentType.startsWith("text/html");
+    if(status < 400 && errorDocument) {
+        m_prefetchError      = QStringLiteral("The server returned an error instead of audio.");
+        m_prefetchFatalError = true;
+    }
+
     bool contentRangeSeen{false};
     const QByteArray contentRange = reply->rawHeader("Content-Range");
     if(!contentRange.isEmpty()) {
         const ContentRange range = parseContentRange(contentRange);
         if(range.total >= 0) {
-            m_prefetchTotal = range.total;
-            m_prefetchEntry->setTotal(range.total);
+            if(m_prefetchEstimateTotal) {
+                if(m_prefetchTotal < 0 || range.total > m_prefetchTotal) {
+                    m_prefetchTotal = range.total;
+                }
+                m_prefetchEntry->setEstimatedTotal(range.total);
+            }
+            else {
+                m_prefetchTotal = range.total;
+                m_prefetchEntry->setTotal(range.total);
+            }
         }
         if(range.start >= 0) {
             responseOffset = range.start;
         }
-        contentRangeSeen = true;
+        m_prefetchResponseEnd = range.end;
+        contentRangeSeen      = true;
     }
 
     if(!contentRangeSeen && status == 200) {
@@ -429,8 +479,17 @@ void SubsonicPlaybackController::updatePrefetchHeaders(QNetworkReply* reply)
         responseOffset         = 0;
         const qint64 contentLength = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
         if(contentLength > 0) {
-            m_prefetchTotal = contentLength;
-            m_prefetchEntry->setTotal(contentLength);
+            if(m_prefetchEstimateTotal) {
+                if(m_prefetchTotal < 0 || contentLength > m_prefetchTotal) {
+                    m_prefetchTotal = contentLength;
+                }
+                m_prefetchEntry->setEstimatedTotal(contentLength);
+            }
+            else {
+                m_prefetchTotal = contentLength;
+                m_prefetchEntry->setTotal(contentLength);
+            }
+            m_prefetchResponseEnd = contentLength - 1;
         }
         m_prefetchActiveLimit = m_prefetchTotal;
     }
@@ -438,8 +497,31 @@ void SubsonicPlaybackController::updatePrefetchHeaders(QNetworkReply* reply)
         m_prefetchFullResponse = false;
     }
 
+    if(status == 416 && m_prefetchRequestedStart > 0) {
+        qint64 actualTotal{-1};
+        const auto ranges = m_prefetchEntry->rangeList();
+        if(!ranges.empty() && ranges.front().start == 0 && m_prefetchRequestedStart >= ranges.back().end) {
+            actualTotal = ranges.back().end;
+        }
+        if(actualTotal < 0 && contentRangeSeen && m_prefetchTotal >= 0) {
+            actualTotal = m_prefetchTotal;
+        }
+        if(actualTotal >= 0) {
+            m_prefetchTotal = actualTotal;
+            m_prefetchEntry->setTotal(actualTotal);
+            m_prefetchEof        = true;
+            m_prefetchFatalError = false;
+            m_prefetchError.clear();
+            m_prefetchResponseStart = -1;
+            m_prefetchWritePos      = -1;
+            qCDebug(SUBSONIC) << "prefetch range beyond EOF; using actual size" << actualTotal;
+            return;
+        }
+    }
+
     if(status >= 400) {
-        m_prefetchError = QStringLiteral("HTTP %1").arg(status);
+        m_prefetchError      = QStringLiteral("HTTP %1").arg(status);
+        m_prefetchFatalError = status != 408 && status != 429 && status < 500;
     }
     else if(contentRangeSeen && m_prefetchRequestedStart >= 0 && responseOffset > m_prefetchRequestedStart) {
         m_prefetchError = QStringLiteral("The server returned an unexpected byte range.");
@@ -468,18 +550,6 @@ void SubsonicPlaybackController::readPrefetchReply(QNetworkReply* reply)
     if(chunk.isEmpty()) {
         return;
     }
-    if(m_prefetchTotal > 0 && !m_prefetchFullResponse) {
-        if(m_prefetchWritePos >= m_prefetchTotal) {
-            return;
-        }
-        const qint64 room = m_prefetchTotal - m_prefetchWritePos;
-        if(chunk.size() > room) {
-            chunk.truncate(static_cast<qsizetype>(room));
-        }
-    }
-    if(chunk.isEmpty()) {
-        return;
-    }
 
     const qint64 written = m_prefetchEntry->writeAt(m_prefetchWritePos, chunk.constData(), chunk.size());
     if(written <= 0) {
@@ -491,8 +561,8 @@ void SubsonicPlaybackController::readPrefetchReply(QNetworkReply* reply)
     }
 
     m_prefetchWritePos += written;
-    if(m_prefetchFullResponse && m_prefetchTotal > 0 && m_prefetchWritePos > m_prefetchTotal) {
-        m_prefetchTotal = m_prefetchWritePos;
+    if(m_prefetchTotal > 0 && m_prefetchWritePos > m_prefetchTotal) {
+        m_prefetchTotal       = m_prefetchWritePos;
         m_prefetchActiveLimit = m_prefetchTotal;
         m_prefetchEntry->setTotal(m_prefetchTotal);
     }
@@ -521,9 +591,10 @@ void SubsonicPlaybackController::finishPrefetch(QNetworkReply* reply)
     const QString replyError  = reply->errorString();
     reply->deleteLater();
 
-    const bool failed = status >= 400 || replyErrorCode != QNetworkReply::NoError || !m_prefetchError.isEmpty();
+    const bool failed = !m_prefetchEof
+        && (status >= 400 || replyErrorCode != QNetworkReply::NoError || !m_prefetchError.isEmpty());
     if(failed) {
-        if(m_prefetchAttempts < 3) {
+        if(!m_prefetchFatalError && m_prefetchAttempts < 3) {
             ++m_prefetchAttempts;
             const int generation = m_prefetchGeneration;
             qCDebug(SUBSONIC) << "Prefetch" << m_prefetchId << "failed:" << replyError << "retry"
@@ -548,13 +619,20 @@ void SubsonicPlaybackController::finishPrefetch(QNetworkReply* reply)
         return;
     }
 
+    if(m_prefetchEstimateTotal && m_prefetchOpenEnded && m_prefetchEntry->total() >= 0
+       && m_prefetchWritePos > m_prefetchResponseStart) {
+        // estimateContentLength is only a guess; a response that ran to EOF gives the real size.
+        m_prefetchTotal = m_prefetchWritePos;
+        m_prefetchEntry->setTotal(m_prefetchTotal);
+    }
+
     if(m_prefetchEntry->total() < 0 && m_prefetchFullResponse) {
         const auto ranges = m_prefetchEntry->rangeList();
         const qint64 total = ranges.empty() ? 0 : ranges.back().end;
         m_prefetchEntry->setTotal(total);
     }
 
-    const bool noProgress = m_prefetchWritePos <= m_prefetchResponseStart;
+    const bool noProgress = !m_prefetchEof && m_prefetchWritePos <= m_prefetchResponseStart;
     if(noProgress) {
         if(m_prefetchAttempts < 3) {
             ++m_prefetchAttempts;
@@ -588,6 +666,16 @@ void SubsonicPlaybackController::finishPrefetch(QNetworkReply* reply)
         return;
     }
 
+    if(m_prefetchProbe) {
+        qCDebug(SUBSONIC) << "Prefetch probe ready for" << m_prefetchId;
+        resetPrefetchState();
+        if(m_cache) {
+            m_cache->evict();
+        }
+        tryPrefetch(); // start the full prefetch now if the current track has caught up
+        return;
+    }
+
     m_prefetchAttempts = 0; // a complete range was received
     m_prefetchHeaders  = false;
     m_prefetchError.clear();
@@ -603,6 +691,7 @@ void SubsonicPlaybackController::cancelPrefetch(bool discard)
     m_prefetchReply           = nullptr;
     m_prefetchEntry.reset();
     m_prefetchId.clear();
+    m_prefetchProbe    = false;
     m_prefetchAttempts = 0;
     m_prefetchError.clear();
 
@@ -621,14 +710,20 @@ void SubsonicPlaybackController::resetPrefetchState()
     m_prefetchReply = nullptr;
     m_prefetchEntry.reset();
     m_prefetchId.clear();
+    m_prefetchProbe    = false;
     m_prefetchAttempts = 0;
     m_prefetchRequestedStart = -1;
     m_prefetchActiveLimit    = -1;
     m_prefetchWritePos       = -1;
     m_prefetchResponseStart  = -1;
+    m_prefetchResponseEnd    = -1;
     m_prefetchTotal          = -1;
     m_prefetchHeaders        = false;
     m_prefetchFullResponse   = false;
+    m_prefetchOpenEnded      = false;
+    m_prefetchEstimateTotal  = false;
+    m_prefetchFatalError     = false;
+    m_prefetchEof            = false;
     m_prefetchError.clear();
 }
 } // namespace Fooyin::Subsonic

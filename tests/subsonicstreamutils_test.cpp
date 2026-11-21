@@ -28,22 +28,27 @@ int main()
 
     const ContentRange full = parseContentRange(QByteArrayLiteral("bytes 0-999/1000"));
     assert(full.start == 0);
+    assert(full.end == 999);
     assert(full.total == 1000);
 
     const ContentRange mid = parseContentRange(QByteArrayLiteral("bytes 500-999/1000"));
     assert(mid.start == 500);
+    assert(mid.end == 999);
     assert(mid.total == 1000);
 
     const ContentRange unknown = parseContentRange(QByteArrayLiteral("bytes 0-99/*"));
     assert(unknown.start == 0);
+    assert(unknown.end == 99);
     assert(unknown.total == -1);
 
     const ContentRange unsatisfiable = parseContentRange(QByteArrayLiteral("bytes */1000"));
     assert(unsatisfiable.start == -1);
+    assert(unsatisfiable.end == -1);
     assert(unsatisfiable.total == 1000);
 
     const ContentRange malformed = parseContentRange(QByteArrayLiteral("garbage"));
     assert(malformed.start == -1);
+    assert(malformed.end == -1);
     assert(malformed.total == -1);
 
     std::cout << "subsonicstreamutils: ok\n";

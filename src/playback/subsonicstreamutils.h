@@ -24,6 +24,7 @@ inline bool isSubsonicStreamUrl(const QUrl& url)
 struct ContentRange
 {
     qint64 start{-1};
+    qint64 end{-1};
     qint64 total{-1};
 };
 
@@ -52,6 +53,13 @@ inline ContentRange parseContentRange(const QByteArray& header)
         range.start = header.mid(space + 1, dash - space - 1).trimmed().toLongLong(&startOk);
         if(!startOk) {
             range.start = -1;
+        }
+
+        const qsizetype endEnd = slash >= 0 ? slash : header.size();
+        bool endOk{false};
+        range.end = header.mid(dash + 1, endEnd - dash - 1).trimmed().toLongLong(&endOk);
+        if(!endOk) {
+            range.end = -1;
         }
     }
 

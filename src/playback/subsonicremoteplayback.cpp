@@ -33,6 +33,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
+#include <QUrlQuery>
 
 #include <algorithm>
 #include <atomic>
@@ -102,12 +103,26 @@ struct StreamState
     // A request has been posted to the network thread but the reply does not exist yet.
     bool requestPosted{false};
     bool rangeCapable{false};
+    //! Set after a range request was answered with a full 200 body from zero.
+    bool ignoresRanges{false};
     bool headersProcessed{false};
     //! True when the current response is a full 200 body from offset zero.
     bool fullResponse{false};
+    //! Contents of Content-Range (or Content-Length for a full response), for estimate correction.
+    qint64 responseEnd{-1};
+    //! True when the last request was sent without a closing byte (to EOF).
+    bool openEnded{false};
+    //! True when the server's total is only an estimate (transcoded stream).
+    bool estimateTotal{false};
+    // Throughput of the current response, used to decide whether a seek should wait or restart.
+    qint64 transferStartedMs{-1};
+    qint64 transferBytes{0};
+    double transferRate{0.0};
     bool streamEnded{false};
     int status{0};
     int attempts{0};
+    bool fatalError{false};
+    bool eofResponse{false};
     int requestSequence{0};
     bool nonBlocking{false};
     bool readWouldBlock{false};
@@ -151,6 +166,28 @@ struct StreamState
         return activeLimit < 0 || pos < activeLimit;
     }
 
+    //! True when waiting for the running transfer is likely faster than restarting it for @p pos.
+    [[nodiscard]] bool shouldWaitFor(qint64 pos) const
+    {
+        if(!willCover(pos) || writePos < 0 || writePos > pos) {
+            return false;
+        }
+
+        if(ignoresRanges) {
+            // Re-requesting would download from zero again; waiting is always at least as good.
+            return true;
+        }
+
+        const qint64 distance = pos - writePos;
+        if(transferRate <= 0.0) {
+            return distance <= CoverWaitGap;
+        }
+        constexpr qint64 MaxWaitBytes = 64LL * 1024 * 1024;
+        constexpr double MaxWaitMs     = 500.0;
+        return distance <= MaxWaitBytes
+            && static_cast<double>(distance) * 1000.0 / transferRate <= MaxWaitMs;
+    }
+
     //! Derives size/range support/response offset from headers. Caller must hold the mutex.
     void updateHeaders(QNetworkReply* source)
     {
@@ -160,20 +197,40 @@ struct StreamState
         headersProcessed = true;
         status           = source->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
+        const QByteArray contentType = source->rawHeader("Content-Type").toLower().trimmed();
+        const bool errorDocument = contentType.startsWith("text/xml") || contentType.startsWith("application/xml")
+            || contentType.startsWith("application/json") || contentType.startsWith("text/html");
+        if(status < 400 && errorDocument) {
+            error      = QStringLiteral("The server returned an error instead of audio.");
+            fatalError = true;
+        }
+
         qint64 responseOffset = requestedStart >= 0 ? requestedStart : 0;
         bool contentRangeSeen = false;
+        responseEnd           = -1;
         const QByteArray contentRange = source->rawHeader("Content-Range");
         if(!contentRange.isEmpty()) {
             const ContentRange range = parseContentRange(contentRange);
             if(range.total >= 0) {
-                total = range.total;
-                if(entry) {
-                    entry->setTotal(total);
+                if(estimateTotal) {
+                    if(total < 0 || range.total > total) {
+                        total = range.total;
+                    }
+                    if(entry) {
+                        entry->setEstimatedTotal(range.total);
+                    }
+                }
+                else {
+                    total = range.total;
+                    if(entry) {
+                        entry->setTotal(total);
+                    }
                 }
             }
             if(range.start >= 0) {
                 responseOffset = range.start;
             }
+            responseEnd      = range.end;
             contentRangeSeen = true;
             rangeCapable     = true;
         }
@@ -187,16 +244,30 @@ struct StreamState
         if(!contentRangeSeen && status == 200) {
             // The server ignored the Range request and is sending the whole file from zero. Keep all
             // of it in the cache instead of discarding a prefix; the read will wait for its offset.
-            fullResponse               = true;
+            fullResponse = true;
+            if(requestedStart > 0) {
+                ignoresRanges = true;
+            }
             responseOffset             = 0;
             const qint64 contentLength = source->header(QNetworkRequest::ContentLengthHeader).toLongLong();
             if(contentLength > 0) {
                 // A 200 body is the complete representation, so its Content-Length is exact even
                 // when an earlier transcoded response carried an estimate.
-                total = contentLength;
-                if(entry) {
-                    entry->setTotal(total);
+                if(estimateTotal) {
+                    if(total < 0 || contentLength > total) {
+                        total = contentLength;
+                    }
+                    if(entry) {
+                        entry->setEstimatedTotal(contentLength);
+                    }
                 }
+                else {
+                    total = contentLength;
+                    if(entry) {
+                        entry->setTotal(total);
+                    }
+                }
+                responseEnd = contentLength - 1;
             }
             activeLimit = total;
         }
@@ -204,16 +275,48 @@ struct StreamState
             fullResponse = false;
         }
 
+        if(status == 416 && requestedStart > 0) {
+            // A 416 for a range at/after the bytes we already have means the stream ended
+            // earlier than its advertised/estimated total.
+            qint64 actualTotal{-1};
+            if(entry) {
+                const auto ranges = entry->rangeList();
+                if(!ranges.empty() && ranges.front().start == 0 && requestedStart >= ranges.back().end) {
+                    actualTotal = ranges.back().end;
+                }
+            }
+            if(actualTotal < 0 && contentRangeSeen && total >= 0) {
+                actualTotal = total;
+            }
+            if(actualTotal >= 0) {
+                total = actualTotal;
+                if(entry) {
+                    entry->setTotal(actualTotal);
+                }
+                eofResponse = true;
+                streamEnded = true;
+                error.clear();
+                fatalError = false;
+                responseStart = -1;
+                writePos      = -1;
+                qCDebug(SUBSONIC) << "stream range beyond EOF; using actual size" << total;
+                return;
+            }
+        }
+
         if(status >= 400) {
-            error = QStringLiteral("HTTP %1").arg(status);
+            error      = QStringLiteral("HTTP %1").arg(status);
+            fatalError = status != 408 && status != 429 && status < 500;
         }
         else if(contentRangeSeen && requestedStart >= 0 && responseOffset > requestedStart) {
             // A range that starts after the requested byte can never satisfy the read.
             error = QStringLiteral("The server returned an unexpected byte range.");
         }
 
-        responseStart = responseOffset;
-        writePos      = responseOffset;
+        responseStart     = responseOffset;
+        writePos          = responseOffset;
+        transferStartedMs = monotonicMs();
+        transferBytes     = 0;
         qCDebug(SUBSONIC) << "stream headers: status" << status << "content-range" << contentRange << "total" << total
                           << "rangeCapable" << rangeCapable << "start" << writePos << "limit" << activeLimit;
     }
@@ -229,20 +332,6 @@ struct StreamState
         if(chunk.isEmpty()) {
             return;
         }
-        if(total > 0 && !fullResponse) {
-            // A ranged response must stay inside the representation; anything beyond its reported
-            // size is not part of the track.
-            if(writePos >= total) {
-                return;
-            }
-            const qint64 room = total - writePos;
-            if(chunk.size() > room) {
-                chunk.truncate(static_cast<qsizetype>(room));
-            }
-        }
-        if(chunk.isEmpty()) {
-            return;
-        }
 
         const qint64 written = entry->writeAt(writePos, chunk.constData(), chunk.size());
         if(written <= 0) {
@@ -254,9 +343,17 @@ struct StreamState
         }
 
         writePos += written;
-        if(fullResponse && total > 0 && writePos > total) {
-            // The transcoded stream is longer than the server's estimate. Keep the extra bytes and
-            // use the real high-water mark as the size instead of truncating playback.
+        transferBytes += written;
+        if(transferStartedMs >= 0) {
+            const qint64 elapsed = monotonicMs() - transferStartedMs;
+            if(elapsed >= 250) {
+                const double sample = static_cast<double>(transferBytes) * 1000.0 / static_cast<double>(elapsed);
+                transferRate = transferRate > 0.0 ? transferRate * 0.7 + sample * 0.3 : sample;
+            }
+        }
+        if(total > 0 && writePos > total) {
+            // Estimated Content-Length (transcoding) can be wrong in both directions. Keep the
+            // extra bytes and use the real high-water mark as the size instead of truncating.
             total       = writePos;
             activeLimit = total;
             entry->setTotal(total);
@@ -274,6 +371,7 @@ public:
         : QIODevice{parent}
         , m_network{std::move(network)}
         , m_url{std::move(url)}
+        , m_estimateTotal{QUrlQuery{m_url}.queryItemValue(u"estimateContentLength"_s) == u"true"_s}
         , m_ignoreSslErrors{ignoreSslErrors}
         , m_monitor{std::move(monitor)}
         , m_state{std::make_shared<StreamState>()}
@@ -406,15 +504,21 @@ public:
             m_state->activeLimit        = -1;
             m_state->writePos           = -1;
             m_state->responseStart      = -1;
+            m_state->responseEnd        = -1;
+            m_state->openEnded          = false;
             m_state->pendingStart       = -1;
             m_state->pendingRequest     = false;
             m_state->requestPosted      = false;
             m_state->rangeCapable       = false;
+            m_state->ignoresRanges      = false;
             m_state->headersProcessed   = false;
             m_state->fullResponse       = false;
             m_state->streamEnded        = false;
             m_state->status             = 0;
             m_state->attempts           = 0;
+            m_state->fatalError         = false;
+            m_state->eofResponse        = false;
+            m_state->estimateTotal      = m_estimateTotal;
             m_state->aborted            = false;
             m_state->error.clear();
             m_state->reply.clear();
@@ -551,8 +655,7 @@ public:
                 m_state->readPos        = pos;
             }
             // The running request is about to reach the target: let the read wait for it.
-            else if(m_state->reply && m_state->willCover(pos) && m_state->writePos >= 0
-                    && pos - m_state->writePos <= CoverWaitGap) {
+            else if(m_state->shouldWaitFor(pos)) {
                 m_state->readPos = pos;
             }
             else {
@@ -835,6 +938,7 @@ private:
         const auto state = m_state;
         QPointer<QNetworkReply> oldReply;
         int sequence{0};
+        bool includeEnd{false};
         {
             const std::scoped_lock lock{m_state->mutex};
             if(m_state->aborted || !m_state->entry) {
@@ -873,9 +977,14 @@ private:
 
             m_state->requestedStart   = start;
             m_state->activeLimit      = end;
+            m_state->openEnded        = end < 0 || (m_state->total >= 0 && end == m_state->total);
+            includeEnd                = !m_state->openEnded;
+            m_state->responseEnd      = -1;
             m_state->headersProcessed = false;
             m_state->fullResponse     = false;
             m_state->status           = 0;
+            m_state->fatalError       = false;
+            m_state->eofResponse      = false;
             m_state->writePos         = -1;
             m_state->responseStart    = -1;
             m_state->streamEnded      = false;
@@ -909,8 +1018,8 @@ private:
         qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "range" << start << '-' << end << "t"
                           << openedAt;
 
-        QMetaObject::invokeMethod(network.get(), [network, url, ignoreSsl, state, start, end, sequence, device, id,
-                                                  requestNo, openedAt] {
+        QMetaObject::invokeMethod(network.get(), [network, url, ignoreSsl, state, start, end, includeEnd, sequence,
+                                                  device, id, requestNo, openedAt] {
             {
                 const std::scoped_lock lock{state->mutex};
                 if(state->aborted || state->requestSequence != sequence) {
@@ -921,15 +1030,18 @@ private:
             QNetworkRequest request = makeNetworkRequest(
                 url, NetworkRequestOption::AlwaysNetwork | NetworkRequestOption::AcceptAny);
             request.setTransferTimeout(StreamIdleTimeoutMs);
+            request.setRawHeader("Accept-Encoding", "identity");
             request.setPriority(QNetworkRequest::HighPriority);
             QByteArray range = QByteArrayLiteral("bytes=") + QByteArray::number(start) + '-';
-            if(end >= 0) {
+            if(includeEnd && end >= 0) {
                 range += QByteArray::number(end - 1);
             }
             request.setRawHeader("Range", range);
 
             QNetworkReply* reply = network->get(request);
-            reply->setReadBufferSize(0); // drain straight to the cache; no in-memory window
+            // Bound QNAM's memory: 0 means unlimited, so keep a small window and let the cache do
+            // the buffering.
+            reply->setReadBufferSize(1024 * 1024);
 
             if(ignoreSsl) {
                 QObject::connect(reply, &QNetworkReply::sslErrors, reply,
@@ -973,10 +1085,10 @@ private:
 
                         if(!state->aborted) {
                             const bool httpError = state->status >= 400;
-                            const bool hasError
-                                = httpError || reply->error() != QNetworkReply::NoError || !state->error.isEmpty();
+                            const bool hasError = !state->eofResponse
+                                && (httpError || reply->error() != QNetworkReply::NoError || !state->error.isEmpty());
 
-                            if(hasError && state->attempts < MaxStreamRetries) {
+                            if(hasError && !state->fatalError && state->attempts < MaxStreamRetries) {
                                 ++state->attempts;
                                 retryFrom = state->writePos >= 0 ? state->writePos : state->requestedStart;
                                 qCDebug(SUBSONIC) << "stream" << id << "request" << requestNo << "failed:"
@@ -994,10 +1106,19 @@ private:
                                                   << state->error;
                             }
                             else if(state->total >= 0) {
+                                if(state->estimateTotal && state->openEnded
+                                   && state->writePos > state->responseStart) {
+                                    // estimateContentLength is only a guess. A successful response
+                                    // that ran to EOF tells us the real high-water mark.
+                                    state->total = state->writePos;
+                                    if(state->entry) {
+                                        state->entry->setTotal(state->total);
+                                    }
+                                }
                                 if(state->complete()) {
                                     state->streamEnded = true;
                                 }
-                                else if(state->writePos <= state->responseStart) {
+                                else if(!state->eofResponse && state->writePos <= state->responseStart) {
                                     // A finished response that delivered no bytes would otherwise make
                                     // the hole filler request the same range forever.
                                     state->error = QStringLiteral("The server sent an empty stream range.");
@@ -1058,6 +1179,7 @@ private:
 
     std::shared_ptr<QNetworkAccessManager> m_network;
     QUrl m_url;
+    bool m_estimateTotal{false};
     bool m_ignoreSslErrors;
     std::shared_ptr<SubsonicBufferMonitor> m_monitor;
     std::shared_ptr<StreamState> m_state;

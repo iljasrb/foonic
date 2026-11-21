@@ -145,6 +145,20 @@ void testEntryIO(const QString& baseDir)
     check(same.get() == entry.get(), "cache returns the same entry for an id");
 }
 
+void testEstimatedTotal(const QString& baseDir)
+{
+    Fooyin::Subsonic::SessionCache cache{baseDir, 4LL * 1024 * 1024};
+    auto entry = cache.entry(QStringLiteral("estimated"));
+    entry->setEstimatedTotal(100);
+    check(entry->total() == 100, "estimated total is recorded");
+    entry->setEstimatedTotal(80);
+    check(entry->total() == 100, "a smaller estimate does not shrink the known size");
+    entry->setEstimatedTotal(120);
+    check(entry->total() == 120, "a larger estimate grows the known size");
+    entry->setTotal(90);
+    check(entry->total() == 90, "an authoritative total can shrink the size");
+}
+
 void testEviction(const QString& baseDir)
 {
     {
@@ -258,6 +272,7 @@ int main(int argc, char** argv)
         return 1;
     }
     testEntryIO(root.path());
+    testEstimatedTotal(root.path());
     testEviction(root.path());
     testDiscard(root.path());
     testSessionDirectory(root.path());

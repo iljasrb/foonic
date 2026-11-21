@@ -7,6 +7,7 @@
 #include "subsonicclient.h"
 
 #include <core/network/networkaccessmanager.h>
+#include <core/network/networkutils.h>
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -329,9 +330,9 @@ void SubsonicClient::get(const QString& method, const QUrlQuery& query, Response
         return;
     }
 
-    QNetworkRequest request{buildUrl(method, query)};
+    QNetworkRequest request = makeNetworkRequest(
+        buildUrl(method, query), NetworkRequestOption::AlwaysNetwork | NetworkRequestOption::AcceptAny);
     request.setTransferTimeout(15000);
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = m_network->get(request);
     if(m_settings.ignoreSslErrors) {
         connect(reply, &QNetworkReply::sslErrors, reply,

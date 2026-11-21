@@ -93,6 +93,13 @@ void testSeekingRanges()
     ranges.add(200, 300);
     ranges.add(400, 500);
 
+    const auto ahead = ranges.firstGapFrom(150, 600);
+    check(ahead.has_value() && ahead->start == 150 && ahead->end == 200, "gap from a position inside a hole");
+    const auto inside = ranges.firstGapFrom(250, 600);
+    check(inside.has_value() && inside->start == 300 && inside->end == 400, "gap after the range containing the position");
+    const auto tail = ranges.firstGapFrom(450, 600);
+    check(tail.has_value() && tail->start == 500 && tail->end == 600, "gap from a position near the end");
+
     // Seeking inside a cached range is a pure local read.
     check(ranges.contiguousBytes(0) == 100, "range 0..100");
     check(ranges.contiguousBytes(100) == 0, "hole after first range");

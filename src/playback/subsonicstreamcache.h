@@ -128,6 +128,32 @@ public:
         return std::nullopt;
     }
 
+    //! First not-yet-downloaded interval at or after @p from, below @p total.
+    [[nodiscard]] std::optional<ByteRange> firstGapFrom(qint64 from, qint64 total) const
+    {
+        if(total <= 0) {
+            return std::nullopt;
+        }
+
+        qint64 pos = std::clamp<qint64>(from, 0, total);
+        for(const ByteRange& range : m_ranges) {
+            if(range.end <= pos) {
+                continue;
+            }
+            if(range.start > pos) {
+                return ByteRange{pos, std::min(range.start, total)};
+            }
+            pos = std::max(pos, range.end);
+            if(pos >= total) {
+                return std::nullopt;
+            }
+        }
+        if(pos < total) {
+            return ByteRange{pos, total};
+        }
+        return std::nullopt;
+    }
+
     [[nodiscard]] bool coversAll(qint64 total) const
     {
         return total >= 0 && !firstGap(total).has_value();
@@ -253,6 +279,12 @@ public:
     {
         const std::scoped_lock lock{m_mutex};
         return m_ranges.firstGap(m_total);
+    }
+
+    [[nodiscard]] std::optional<ByteRange> firstGapFrom(qint64 from) const
+    {
+        const std::scoped_lock lock{m_mutex};
+        return m_ranges.firstGapFrom(from, m_total);
     }
 
     [[nodiscard]] std::vector<ByteRange> rangeList() const

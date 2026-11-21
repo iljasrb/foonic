@@ -59,6 +59,8 @@ constexpr qint64 SeekBackMargin = 128LL * 1024;
 // A forward seek within this distance keeps the running transfer and waits for it to reach the
 // target instead of cancelling and re-requesting.
 constexpr qint64 CoverWaitGap = 2LL * 1024 * 1024;
+// FFmpeg can issue follow-up seeks more than a second after the first one.
+constexpr qint64 SeekSettleMs = 2000;
 std::atomic_bool remotePrepareTargetAllowed{false};
 qint64 monotonicMs()
 {
@@ -465,10 +467,13 @@ public:
             const std::scoped_lock lock{m_state->mutex};
             if(m_state->aborted || m_state->reply || m_state->requestPosted || m_state->pendingRequest
                || !m_state->error.isEmpty() || m_state->total < 0 || m_state->waitingPos >= 0
-               || monotonicMs() - m_state->lastSeekMs < 500) {
+               || monotonicMs() - m_state->lastSeekMs < SeekSettleMs) {
                 return;
             }
-            const auto gap = m_state->entry ? m_state->entry->firstGap() : std::nullopt;
+            auto gap = m_state->entry ? m_state->entry->firstGapFrom(m_state->readPos) : std::nullopt;
+            if(!gap && m_state->entry) {
+                gap = m_state->entry->firstGap(); // nothing ahead: slowly fill what is behind
+            }
             if(!gap) {
                 m_state->streamEnded = true;
                 return;

@@ -1272,6 +1272,7 @@ public:
     std::optional<AudioFormat> init(const AudioSource& source, const Track& track, DecoderOptions options) override
     {
         m_inner.reset();
+        m_started  = false;
         m_seekable = false;
 
         if(!source.device || !isSubsonicStreamUrl(QUrl{source.filepath}) || !m_innerCreator) {
@@ -1314,12 +1315,14 @@ public:
     {
         if(m_inner) {
             m_inner->start();
+            m_started = true;
         }
     }
 
     void stop() override
     {
         qCDebug(SUBSONIC) << "decoder stop";
+        m_started = false;
         if(m_inner) {
             m_inner->stop();
         }
@@ -1345,7 +1348,11 @@ public:
 
     [[nodiscard]] bool allowsConcurrentDecoding() const override
     {
-        return m_inner ? m_inner->allowsConcurrentDecoding() : false;
+        // Fooyin's drain-fill preparation asks a not-yet-started candidate decoder whether it may
+        // prime a stream. Returning true there leads to a prepared remote stream being committed
+        // and then loaded again, restarting the track. The active playback decoder has been
+        // started, so it still allows concurrent reads while the candidate does not.
+        return m_started && m_inner && m_inner->allowsConcurrentDecoding();
     }
 
     [[nodiscard]] int playbackPrebufferMs() const override
@@ -1410,6 +1417,7 @@ private:
     SettingsManager* m_settings;
     std::unique_ptr<AudioDecoder> m_inner;
     bool m_seekable{false};
+    bool m_started{false};
 };
 } // namespace
 

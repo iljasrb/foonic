@@ -454,9 +454,9 @@ public:
     }
 
     //! Fills the first hole left behind by a seek so the whole track ends up cached. Network thread.
-    //! @p fromRead suppresses fills for a short time after a seek; read-driven fills otherwise
-    //! fight FFmpeg's seek probes. Finished transfers always get to schedule a fill.
-    void fillNextGap(bool fromRead = false)
+    //! Stay quiet briefly after any seek: FFmpeg usually issues several seeks before settling, and
+    //! starting a hole fill in between only causes requests to be cancelled and restarted.
+    void fillNextGap()
     {
         qint64 start{-1};
         qint64 end{-1};
@@ -464,7 +464,7 @@ public:
             const std::scoped_lock lock{m_state->mutex};
             if(m_state->aborted || m_state->reply || m_state->requestPosted || m_state->pendingRequest
                || !m_state->error.isEmpty() || m_state->total < 0 || m_state->waitingPos >= 0
-               || (fromRead && monotonicMs() - m_state->lastSeekMs < 500)) {
+               || monotonicMs() - m_state->lastSeekMs < 500) {
                 return;
             }
             const auto gap = m_state->entry ? m_state->entry->firstGap() : std::nullopt;
@@ -754,7 +754,7 @@ protected:
                 lock.unlock();
                 // Keep filling holes behind/ahead while the decoder is reading cached data. Without
                 // this, a hole left by a seek would only be retried when another transfer ends.
-                fillNextGap(true);
+                fillNextGap();
                 return read;
             }
 

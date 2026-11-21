@@ -7,6 +7,7 @@
 #pragma once
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QVariant>
 
@@ -23,12 +24,14 @@ class SettingsManager;
 class Track;
 
 namespace Subsonic {
+class CacheEntry;
+class SessionCache;
 class SubsonicBufferMonitor;
 class SubsonicClient;
 
 /*!
- * Playback-side companion for remote Subsonic streams: scrobbling, the seek-fade override and the
- * immediate seekbar refresh. Seeking/pausing the stream itself lives in SubsonicStreamDevice.
+ * Playback-side companion for remote Subsonic streams: scrobbling, the seek-fade override, the
+ * immediate seekbar refresh and next-track prefetching into the shared session cache.
  */
 class SubsonicPlaybackController : public QObject
 {
@@ -37,7 +40,7 @@ class SubsonicPlaybackController : public QObject
 public:
     SubsonicPlaybackController(std::shared_ptr<NetworkAccessManager> network, SettingsManager* settings,
                                PlayerController* player, std::shared_ptr<SubsonicBufferMonitor> bufferMonitor,
-                               QObject* parent = nullptr);
+                               std::shared_ptr<SessionCache> cache, QObject* parent = nullptr);
     ~SubsonicPlaybackController() override;
 
 private:
@@ -45,15 +48,24 @@ private:
     void startScrobble(const Track& track);
     void maybeScrobble(uint64_t positionMs);
     [[nodiscard]] QString songIdForTrack(const Track& track) const;
+
+    void updatePinnedTracks();
+    [[nodiscard]] bool hasComfortableLead() const;
     void tryPrefetch();
     void startPrefetch(const QString& songId);
-    void cancelPrefetch();
+    void startPrefetchRequest();
+    void readPrefetchReply(QNetworkReply* reply);
+    void updatePrefetchHeaders(QNetworkReply* reply);
+    void finishPrefetch(QNetworkReply* reply);
+    void cancelPrefetch(bool discard);
+    void resetPrefetchState();
 
     std::shared_ptr<NetworkAccessManager> m_network;
     SettingsManager* m_settings;
     SubsonicClient* m_client;
     PlayerController* m_player;
     std::shared_ptr<SubsonicBufferMonitor> m_bufferMonitor;
+    std::shared_ptr<SessionCache> m_cache;
 
     // fooyin's seek/manual crossfade is gated on Engine/Crossfading (off by default); enable it for
     // remote Subsonic playback and restore the user's values afterwards.
@@ -66,10 +78,25 @@ private:
     uint64_t m_scrobbleAt{0};
     bool m_scrobbled{false};
 
-    // Next track pre-downloaded to disk once the current one is fully buffered.
+    QString m_currentId;
+    QString m_nextId;
+    QSet<QString> m_pinnedIds;
+
+    // Next track downloading into the same cache entry that playback will use.
     QNetworkReply* m_prefetchReply{nullptr};
-    QString m_pendingPrefetchId;
+    std::shared_ptr<CacheEntry> m_prefetchEntry;
     QString m_prefetchId;
+    QString m_prefetchFailedId;
+    int m_prefetchAttempts{0};
+    int m_prefetchGeneration{0};
+    qint64 m_prefetchRequestedStart{-1};
+    qint64 m_prefetchActiveLimit{-1};
+    qint64 m_prefetchWritePos{-1};
+    qint64 m_prefetchResponseStart{-1};
+    qint64 m_prefetchTotal{-1};
+    bool m_prefetchHeaders{false};
+    bool m_prefetchFullResponse{false};
+    QString m_prefetchError;
 };
 } // namespace Subsonic
 } // namespace Fooyin

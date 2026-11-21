@@ -8,7 +8,6 @@
 
 #include <utils/settings/settingsmanager.h>
 
-#include <QByteArray>
 #include <QLoggingCategory>
 #include <QStandardPaths>
 #include <QString>
@@ -32,6 +31,7 @@ struct SubsonicSettings
     bool ignoreSslErrors{false};           // accept self-signed/invalid TLS certificates
     QString musicFolderId;             // limit browsing/search to one server folder; empty = all
     QString libraryDir;                // albums/songs downloaded here are added to the fooyin library
+    int sessionCacheMb{2048};          // disk cache for the current session, shared by playback and prefetch
     int remotePrebufferMs{400};        // decoded audio the engine wants buffered before resuming after a seek
     bool seekFadeEnabled{true};        // fade out/in around remote seeks
     int seekFadeMs{200};               // seek fade length
@@ -73,6 +73,7 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/IgnoreSslErrors"), false);
     settings->createSetting(QStringLiteral("Subsonic/MusicFolderId"), QString{});
     settings->createSetting(QStringLiteral("Subsonic/LibraryDir"), defaultLibraryDir());
+    settings->createSetting(QStringLiteral("Subsonic/SessionCacheMb"), 2048);
     settings->createSetting(QStringLiteral("Subsonic/RemotePrebufferMs"), 400);
     settings->createSetting(QStringLiteral("Subsonic/SeekFadeEnabled"), true);
     settings->createSetting(QStringLiteral("Subsonic/SeekFadeMs"), 200);
@@ -82,24 +83,6 @@ inline void registerSubsonicSettings(SettingsManager* settings)
     settings->createSetting(QStringLiteral("Subsonic/ArtistSort"), 0);
     settings->createSetting(QStringLiteral("Subsonic/AlbumSort"), 0);
     settings->createSetting(QStringLiteral("Subsonic/PlaylistSort"), 0);
-    settings->createSetting(QStringLiteral("Subsonic/SearchArtists"), true);
-    settings->createSetting(QStringLiteral("Subsonic/SearchAlbums"), true);
-    settings->createSetting(QStringLiteral("Subsonic/SearchSongs"), true);
-    settings->createSetting(QStringLiteral("Subsonic/SearchPlaylists"), true);
-    settings->createSetting(QStringLiteral("Subsonic/SearchPlaylistTracks"), false);
-    settings->createSetting(QStringLiteral("Subsonic/MatchMode"), 0);
-    settings->createSetting(QStringLiteral("Subsonic/GridView"), false);
-    settings->createSetting(QStringLiteral("Subsonic/DetailsVisible"), false);
-    // Existing installs saved the old default (visible). Hide the panel once so "hidden by default"
-    // also applies to them; afterwards the Details toggle is the user's choice and is respected.
-    settings->createSetting(QStringLiteral("Subsonic/DetailsVisibleMigrated"), false);
-    if(!settings->value(QStringLiteral("Subsonic/DetailsVisibleMigrated")).toBool()) {
-        settings->set(QStringLiteral("Subsonic/DetailsVisible"), false);
-        settings->set(QStringLiteral("Subsonic/DetailsVisibleMigrated"), true);
-        settings->storeSettings();
-    }
-    settings->createSetting(QStringLiteral("Subsonic/HeaderState"), QByteArray{});
-    settings->createSetting(QStringLiteral("Subsonic/DialogGeometry"), QByteArray{});
 }
 
 inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
@@ -124,6 +107,7 @@ inline SubsonicSettings loadSubsonicSettings(SettingsManager* settings)
     if(result.libraryDir.isEmpty()) {
         result.libraryDir = defaultLibraryDir();
     }
+    result.sessionCacheMb    = std::clamp(settings->value(QStringLiteral("Subsonic/SessionCacheMb")).toInt(), 128, 16384);
     result.remotePrebufferMs = std::clamp(settings->value(QStringLiteral("Subsonic/RemotePrebufferMs")).toInt(), 100, 10000);
     result.seekFadeEnabled   = settings->value(QStringLiteral("Subsonic/SeekFadeEnabled")).toBool();
     result.seekFadeMs        = std::clamp(settings->value(QStringLiteral("Subsonic/SeekFadeMs")).toInt(), 0, 5000);
@@ -145,6 +129,7 @@ inline void saveSubsonicSettings(SettingsManager* settings, const SubsonicSettin
     settings->set(QStringLiteral("Subsonic/IgnoreSslErrors"), subsonic.ignoreSslErrors);
     settings->set(QStringLiteral("Subsonic/MusicFolderId"), subsonic.musicFolderId);
     settings->set(QStringLiteral("Subsonic/LibraryDir"), subsonic.libraryDir);
+    settings->set(QStringLiteral("Subsonic/SessionCacheMb"), subsonic.sessionCacheMb);
     settings->set(QStringLiteral("Subsonic/RemotePrebufferMs"), subsonic.remotePrebufferMs);
     settings->set(QStringLiteral("Subsonic/SeekFadeEnabled"), subsonic.seekFadeEnabled);
     settings->set(QStringLiteral("Subsonic/SeekFadeMs"), subsonic.seekFadeMs);

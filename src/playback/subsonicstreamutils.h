@@ -7,7 +7,6 @@
 #pragma once
 
 #include <QByteArray>
-#include <QStandardPaths>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -59,15 +58,4 @@ inline ContentRange parseContentRange(const QByteArray& header)
     return range;
 }
 
-//! Directory holding fully prefetched tracks, keyed by song id.
-inline QString prefetchDir()
-{
-    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/foonic/prefetch");
-}
-
-//! Path of a prefetched track. Only written once completely downloaded.
-inline QString prefetchPath(const QString& songId)
-{
-    return prefetchDir() + u'/' + songId + QStringLiteral(".ready");
-}
 } // namespace Fooyin::Subsonic

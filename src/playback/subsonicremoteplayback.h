@@ -14,6 +14,7 @@ class NetworkAccessManager;
 class SettingsManager;
 
 namespace Subsonic {
+class SessionCache;
 class SubsonicBufferMonitor;
 
 /*!
@@ -24,10 +25,11 @@ class SubsonicBufferMonitor;
  * registers a decoder that wraps fooyin's own FFmpeg decoder, handing it that device plus a
  * non-remote track copy so the "remote => not seekable" rule is not applied.
  *
- * Returns the monitor that devices publish their downloaded range to.
+ * Devices and the next-track prefetcher share @p cache, so a track is downloaded once and a
+ * prefetched next track starts without buffering. Returns the monitor that devices publish to.
  */
 std::shared_ptr<SubsonicBufferMonitor> registerSubsonicRemotePlayback(
     const std::shared_ptr<AudioLoader>& loader, std::shared_ptr<NetworkAccessManager> network,
-    SettingsManager* settings);
+    SettingsManager* settings, std::shared_ptr<SessionCache> cache);
 } // namespace Subsonic
 } // namespace Fooyin

@@ -14,6 +14,7 @@
 #include "subsonicremoteplayback.h"
 #include "subsonicsettings.h"
 #include "subsonicsettingspage.h"
+#include "subsonicstreamcache.h"
 #include "subsonicstreamutils.h"
 
 #include <core/network/networkaccessmanager.h>
@@ -40,24 +41,28 @@ void SubsonicPlugin::initialise(const CorePluginContext& context)
 
     registerSubsonicSettings(m_settings);
 
+    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
+    m_cache = std::make_shared<SessionCache>(streamCacheBaseDir(),
+                                             static_cast<qint64>(settings.sessionCacheMb) * 1024 * 1024);
+    m_settings->subscribe(QStringLiteral("Subsonic/SessionCacheMb"), this, [this](const QVariant& value) {
+        if(m_cache) {
+            const int limitMb = std::clamp(value.toInt(), 128, 16384);
+            m_cache->setLimitBytes(static_cast<qint64>(limitMb) * 1024 * 1024);
+        }
+    });
+
     // Subsonic streams are plain http(s), which fooyin hard-codes as non-seekable. Install a seekable
     // HTTP-Range device and a decoder that keeps using fooyin's FFmpeg backend through it.
-    m_bufferMonitor = registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings);
+    m_bufferMonitor = registerSubsonicRemotePlayback(context.audioLoader, m_network, m_settings, m_cache);
 
-    new SubsonicPlaybackController{m_network, m_settings, context.playerController, m_bufferMonitor, this};
+    new SubsonicPlaybackController{m_network, m_settings, context.playerController, m_bufferMonitor, m_cache,
+                                   this};
 
     m_libraryDownloads = new SubsonicLibraryDownloader{m_network, m_settings, context.audioLoader,
                                                        context.library, this};
 
-    // Subsonic stream buffering now lives in SubsonicStreamDevice, so fooyin's global remote
-    // read-ahead no longer applies to Subsonic tracks. Keep the engine's remote resume threshold in
-    // sync with the plugin setting (it also has to be re-applied when the setting changes).
-    m_settings->set(QStringLiteral("Engine/RemotePrebufferMs"),
-                    loadSubsonicSettings(m_settings).remotePrebufferMs);
-
-    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
     qCInfo(SUBSONIC) << "settings: format" << settings.format << "maxBitRate" << settings.maxBitRate
-                     << "streamBufferMb" << settings.streamBufferMb << "remotePrebufferMs"
+                     << "sessionCacheMb" << settings.sessionCacheMb << "remotePrebufferMs"
                      << settings.remotePrebufferMs;
 }
 

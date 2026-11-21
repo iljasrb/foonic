@@ -28,6 +28,7 @@ class SettingsManager;
 class WidgetProvider;
 
 namespace Subsonic {
+class SessionCache;
 class SubsonicBufferMonitor;
 class SubsonicDialog;
 class SubsonicLibraryDownloader;
@@ -54,6 +55,7 @@ private:
     ActionManager* m_actionManager{nullptr};
     WidgetProvider* m_widgetProvider{nullptr};
     SubsonicLibraryDownloader* m_libraryDownloads{nullptr};
+    std::shared_ptr<SessionCache> m_cache;
     std::shared_ptr<SubsonicBufferMonitor> m_bufferMonitor;
     QPointer<SubsonicDialog> m_dialog;
 };

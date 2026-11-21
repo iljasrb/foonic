@@ -307,6 +307,8 @@ QUrl SubsonicClient::streamUrl(const QString& id) const
         if(m_settings.maxBitRate > 0) {
             query.addQueryItem(u"maxBitRate"_s, QString::number(m_settings.maxBitRate));
         }
+        // Gives the stream cache a size estimate for a transcoded response.
+        query.addQueryItem(u"estimateContentLength"_s, u"true"_s);
     }
 
     return buildUrl(u"stream"_s, query);
@@ -327,7 +329,10 @@ void SubsonicClient::get(const QString& method, const QUrlQuery& query, Response
         return;
     }
 
-    QNetworkReply* reply = m_network->get(QNetworkRequest{buildUrl(method, query)});
+    QNetworkRequest request{buildUrl(method, query)};
+    request.setTransferTimeout(15000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = m_network->get(request);
     if(m_settings.ignoreSslErrors) {
         connect(reply, &QNetworkReply::sslErrors, reply,
                 [reply](const QList<QSslError>&) { reply->ignoreSslErrors(); });
@@ -371,6 +376,10 @@ QUrl SubsonicClient::buildUrl(const QString& method, QUrlQuery query) const
     QString path = url.path();
     while(path.endsWith(u'/')) {
         path.chop(1);
+    }
+    // Accept both "https://host" and "https://host/rest" as the configured server URL.
+    if(path.endsWith(u"/rest"_s, Qt::CaseInsensitive)) {
+        path.chop(5);
     }
     url.setPath(path + u"/rest/"_s + method);
 

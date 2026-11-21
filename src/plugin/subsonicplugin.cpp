@@ -7,7 +7,7 @@
 #include "subsonicplugin.h"
 
 #include "subsonicbrowserwidget.h"
-#include "subsonicbufferbar.h"
+#include "subsonicbuffermonitor.h"
 #include "subsonicdialog.h"
 #include "subsoniclibrarydownloader.h"
 #include "subsonicplaybackcontroller.h"
@@ -73,10 +73,6 @@ void SubsonicPlugin::initialise(const GuiPluginContext& context)
     m_widgetProvider = context.widgetProvider;
 
     new SubsonicSettingsPage{m_network, m_settings, this};
-
-    if(m_bufferMonitor) {
-        new SubsonicBufferBar{m_settings, m_bufferMonitor.get(), this};
-    }
 
     m_widgetProvider->registerWidget(
         u"SubsonicBrowser"_s,

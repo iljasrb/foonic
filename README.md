@@ -37,7 +37,6 @@ Settings are under **Settings → Foonic**:
   next track are cached; playback and prefetch share the same file. The cache is deleted when
   fooyin exits.
 - **Library folder**: destination for **Download to Library**.
-- **Buffered range on the seekbar**: show which parts of the current track are cached.
 
 ## Notes
 

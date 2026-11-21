@@ -6,7 +6,7 @@
 
 #include "subsonicremoteplayback.h"
 
-#include "subsonicbufferbar.h"
+#include "subsonicbuffermonitor.h"
 #include "subsonicsettings.h"
 #include "subsonicstreamcache.h"
 #include "subsonicstreamutils.h"

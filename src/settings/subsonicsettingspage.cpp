@@ -69,7 +69,6 @@ private:
     QSpinBox* m_seekFadeMs;
     QSpinBox* m_coverArtSize;
     QCheckBox* m_scrobble;
-    QCheckBox* m_bufferBar;
     QComboBox* m_authMode;
     QLineEdit* m_apiKey;
 };
@@ -95,7 +94,6 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     , m_seekFadeMs{new QSpinBox{this}}
     , m_coverArtSize{new QSpinBox{this}}
     , m_scrobble{new QCheckBox{tr("Report now playing and play counts to the server"), this}}
-    , m_bufferBar{new QCheckBox{tr("Show the buffered range on the seekbar"), this}}
     , m_authMode{new QComboBox{this}}
     , m_apiKey{new QLineEdit{this}}
 {
@@ -177,7 +175,6 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     playbackForm->addRow(tr("Remote prebuffer"), m_remotePrebuffer);
     playbackForm->addRow(tr("Seek fade"), fadeRow);
     playbackForm->addRow({}, m_scrobble);
-    playbackForm->addRow({}, m_bufferBar);
 
     auto* playbackGroup = new QGroupBox{tr("Playback"), this};
     playbackGroup->setLayout(playbackForm);
@@ -267,7 +264,6 @@ void SubsonicSettingsPageWidget::load(const SubsonicSettings& settings)
     m_seekFadeMs->setValue(settings.seekFadeMs);
     m_coverArtSize->setValue(settings.coverArtSize);
     m_scrobble->setChecked(settings.scrobblePlays);
-    m_bufferBar->setChecked(settings.bufferBarEnabled);
     setTestStatus({});
     updateBitRateState();
 
@@ -291,7 +287,6 @@ void SubsonicSettingsPageWidget::apply()
     settings.seekFadeMs             = m_seekFadeMs->value();
     settings.coverArtSize           = m_coverArtSize->value();
     settings.scrobblePlays          = m_scrobble->isChecked();
-    settings.bufferBarEnabled       = m_bufferBar->isChecked();
 
     saveSubsonicSettings(m_settings, settings);
     // Persist immediately so the choice survives an unclean exit (the core only flushes every 5 minutes).

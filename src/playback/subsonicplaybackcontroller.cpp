@@ -167,9 +167,10 @@ void SubsonicPlaybackController::updateSubsonicFade(bool active)
         const SubsonicSettings settings = loadSubsonicSettings(m_settings);
         const int fadeMs = std::clamp(settings.seekFadeMs, 0, 5000);
         values.seek = {.in = fadeMs, .out = fadeMs, .curve = Engine::FadeCurve::Linear, .enabled = settings.seekFadeEnabled};
-        values.manualChange.enabled = true;
-        values.manualChange.in      = 150;
-        values.manualChange.out     = 150;
+        // Do not configure a manual crossfade: fooyin would prepare a remote crossfade target before
+        // a user track change, and a non-started remote decoder cannot prime that stream. A normal
+        // manual change fade still works and track clicks load immediately.
+        values.manualChange.enabled = false;
         values.autoChange.enabled   = false;
         m_settings->set(crossfadeKey, true);
         m_settings->set(valuesKey, QVariant::fromValue(values));

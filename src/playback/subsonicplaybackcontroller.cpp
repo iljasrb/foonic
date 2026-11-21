@@ -138,6 +138,8 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
                         m_bufferMonitor->reset();
                     }
                 }
+                updateSubsonicFade(m_player->currentTrack().isRemote()
+                                   && isSubsonicStreamUrl(QUrl{m_player->currentTrack().filepath()}));
             });
     // fooyin's seek container refreshes the elapsed label only on positionChanged, which the engine
     // publishes after the new position is prefetched. Republish it immediately so a remote seek shows
@@ -196,7 +198,9 @@ void SubsonicPlaybackController::updateSubsonicFade(bool active)
         values.seek = {.in = fadeMs, .out = fadeMs, .curve = Engine::FadeCurve::Linear, .enabled = settings.seekFadeEnabled};
         // Manual changes prepare the clicked track while the current one keeps playing. The decoder
         // only allows candidate priming during the short window opened by trackChangeRequested.
-        values.manualChange.enabled = true;
+        // While paused/stopped there is nothing to keep playing, so use the normal load path.
+        const bool playing = m_player && m_player->playState() == Player::PlayState::Playing;
+        values.manualChange.enabled = playing;
         values.manualChange.in      = 150;
         values.manualChange.out     = 150;
         values.autoChange.enabled   = false;

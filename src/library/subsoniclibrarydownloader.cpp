@@ -7,8 +7,6 @@
 #include "subsoniclibrarydownloader.h"
 
 #include "subsonicclient.h"
-#include "subsonicnetwork.h"
-#include "subsonicpaths.h"
 #include "subsonicsettings.h"
 #include "subsonictrack.h"
 
@@ -35,8 +33,22 @@ namespace {
 constexpr int MaxAttempts   = 3;
 constexpr int RetryDelayMs  = 750;
 constexpr int CoverSize     = 500;
+constexpr int MaxNameLength = 120;
 constexpr int ProgressEmitIntervalMs = 250;
-constexpr int DownloadTimeoutMs = 30000;
+
+QString sanitise(QString name)
+{
+    static const QRegularExpression Invalid{QStringLiteral(R"([\\/:*?"<>|\x00-\x1f])")};
+    name.replace(Invalid, u"_"_s);
+    return name.trimmed().left(MaxNameLength);
+}
+
+QString withIdSuffix(const QString& path, const QString& id)
+{
+    const QFileInfo info{path};
+    return info.path() + u"/"_s + info.completeBaseName() + u" ["_s + id + u"]"_s
+           + (info.suffix().isEmpty() ? QString{} : u"."_s + info.suffix());
+}
 } // namespace
 
 SubsonicLibraryDownloader::SubsonicLibraryDownloader(std::shared_ptr<NetworkAccessManager> network,
@@ -172,7 +184,6 @@ void SubsonicLibraryDownloader::processNext()
     m_totalBytes   = -1;
     m_rangeChecked = false;
     m_sentRange    = false;
-    m_useDownloadEndpoint = true;
 
     QDir{}.mkpath(QFileInfo{m_current.path}.path());
 
@@ -207,20 +218,14 @@ void SubsonicLibraryDownloader::startRequest()
     m_rangeChecked = false;
     m_sentRange    = m_received > 0;
 
-    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
-    m_client->setSettings(settings);
+    m_client->setSettings(loadSubsonicSettings(m_settings));
 
-    // Library downloads always fetch the original file. Using `stream` here would silently save a
-    // transcoded MP3/Opus/AAC under the original file's extension when transcoding is enabled.
-    const QString songId = m_current.song.value(u"id"_s).toString();
-    const QUrl url = m_useDownloadEndpoint ? m_client->downloadUrl(songId) : m_client->originalStreamUrl(songId);
-    QNetworkRequest request = subsonicRequest(url, DownloadTimeoutMs);
+    QNetworkRequest request{m_client->streamUrl(m_current.song.value(u"id"_s).toString())};
     if(m_sentRange) {
         request.setRawHeader("Range", "bytes=" + QByteArray::number(m_received) + "-");
     }
 
     m_reply = m_network->get(request);
-    applySslIgnore(m_reply, settings);
     connect(m_reply, &QIODevice::readyRead, this, &SubsonicLibraryDownloader::handleReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &SubsonicLibraryDownloader::handleFinished);
 }
@@ -312,25 +317,6 @@ void SubsonicLibraryDownloader::handleFinished()
         return;
     }
 
-    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    if(m_useDownloadEndpoint && (status == 404 || status == 405 || status == 501)) {
-        // Older servers may not expose the `download` endpoint. Fall back to a raw stream, which
-        // still returns the original file without transcoding.
-        m_useDownloadEndpoint = false;
-        if(m_file) {
-            m_file->resize(0);
-            m_file->seek(0);
-        }
-        m_received     = 0;
-        m_totalBytes   = -1;
-        m_requestStart = 0;
-        m_rangeChecked = false;
-        m_sentRange    = false;
-        qCWarning(SUBSONIC) << "download endpoint unavailable, falling back to stream?format=raw";
-        QTimer::singleShot(RetryDelayMs, this, &SubsonicLibraryDownloader::startRequest);
-        return;
-    }
-
     const bool complete
         = (error == QNetworkReply::NoError) && (m_totalBytes < 0 ? m_received > 0 : m_received >= m_totalBytes);
     if(complete) {
@@ -396,24 +382,12 @@ void SubsonicLibraryDownloader::embedCover()
         return;
     }
 
-    const SubsonicSettings settings = loadSubsonicSettings(m_settings);
-    m_client->setSettings(settings);
-    QNetworkReply* reply = subsonicGet(m_network, m_client->coverArtUrl(coverArt, CoverSize), settings);
-    if(!reply) {
-        advance(true);
-        return;
-    }
+    m_client->setSettings(loadSubsonicSettings(m_settings));
+    QNetworkReply* reply = m_network->get(QNetworkRequest{m_client->coverArtUrl(coverArt, CoverSize)});
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         reply->deleteLater();
 
-        if(m_cancel) {
-            // Cancelled while fetching the cover: drop the finished file and count it as failed.
-            QFile::remove(m_current.path);
-            advance(false);
-            return;
-        }
-
-        if(reply->error() == QNetworkReply::NoError) {
+        if(!m_cancel && reply->error() == QNetworkReply::NoError) {
             const QByteArray data = reply->readAll();
             if(!data.isEmpty()) {
                 // Trust an image content type; otherwise sniff, so an error envelope is not embedded as art.
@@ -467,25 +441,45 @@ void SubsonicLibraryDownloader::emitProgress()
 
 QString SubsonicLibraryDownloader::existingLocalPath(const QJsonObject& song) const
 {
-    const QString dir = loadSubsonicSettings(m_settings).libraryDir;
-    const QString id  = song.value(u"id"_s).toString();
-
-    // Current layout, then the pre-multi-disc layout so existing downloads keep being recognised.
-    for(const bool includeDisc : {true, false}) {
-        const QString base = subsonicSongPath(song, dir, includeDisc);
-        if(QFileInfo::exists(base)) {
-            return base;
-        }
-        const QString withId = withIdSuffix(base, id);
-        if(QFileInfo::exists(withId)) {
-            return withId;
-        }
+    const QString base = pathForSong(song, loadSubsonicSettings(m_settings).libraryDir);
+    if(QFileInfo::exists(base)) {
+        return base;
     }
-    return {};
+    const QString withId = withIdSuffix(base, song.value(u"id"_s).toString());
+    return QFileInfo::exists(withId) ? withId : QString{};
 }
 
 QString SubsonicLibraryDownloader::pathForSong(const QJsonObject& song, const QString& dir) const
 {
-    return subsonicSongPath(song, dir);
+    QString albumArtist = song.value(u"albumArtist"_s).toString();
+    if(albumArtist.isEmpty()) {
+        albumArtist = song.value(u"artist"_s).toString();
+    }
+    if(albumArtist.isEmpty()) {
+        albumArtist = u"Unknown Artist"_s;
+    }
+
+    QString album = song.value(u"album"_s).toString();
+    if(album.isEmpty()) {
+        album = u"Unknown Album"_s;
+    }
+
+    QString title = song.value(u"title"_s).toString();
+    if(title.isEmpty()) {
+        title = song.value(u"id"_s).toString();
+    }
+
+    const int trackNumber = song.value(u"track"_s).toInt();
+    if(trackNumber > 0) {
+        title = QStringLiteral("%1 - %2").arg(trackNumber, 2, 10, QLatin1Char('0')).arg(title);
+    }
+
+    QString suffix = song.value(u"suffix"_s).toString();
+    if(suffix.isEmpty()) {
+        suffix = u"bin"_s;
+    }
+
+    return dir + u"/"_s + sanitise(albumArtist) + u"/"_s + sanitise(album) + u"/"_s + sanitise(title) + u"."_s
+           + suffix;
 }
 } // namespace Fooyin::Subsonic

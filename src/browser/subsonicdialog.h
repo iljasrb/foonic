@@ -10,8 +10,6 @@
 
 #include <memory>
 
-class QCloseEvent;
-
 namespace Fooyin {
 class NetworkAccessManager;
 class PlaylistInteractor;
@@ -30,11 +28,7 @@ public:
                    SubsonicLibraryDownloader* libraryDownloads, SettingsManager* settings,
                    QWidget* parent = nullptr);
 
-protected:
-    void closeEvent(QCloseEvent* event) override;
-
 private:
-    SettingsManager* m_settings;
     SubsonicBrowser* m_browser;
 };
 } // namespace Subsonic

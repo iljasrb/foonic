@@ -63,6 +63,7 @@ private:
     QComboBox* m_format;
     QSpinBox* m_maxBitRate;
     QLineEdit* m_libraryDir;
+    QSpinBox* m_streamBuffer;
     QSpinBox* m_remotePrebuffer;
     QCheckBox* m_seekFade;
     QSpinBox* m_seekFadeMs;
@@ -88,6 +89,7 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     , m_format{new QComboBox{this}}
     , m_maxBitRate{new QSpinBox{this}}
     , m_libraryDir{new QLineEdit{this}}
+    , m_streamBuffer{new QSpinBox{this}}
     , m_remotePrebuffer{new QSpinBox{this}}
     , m_seekFade{new QCheckBox{tr("Fade seek"), this}}
     , m_seekFadeMs{new QSpinBox{this}}
@@ -142,6 +144,10 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     m_maxBitRate->setSuffix(u" kbps"_s);
     m_maxBitRate->setSpecialValueText(tr("Unlimited"));
 
+    m_streamBuffer->setRange(8, 1024);
+    m_streamBuffer->setSuffix(u" MB"_s);
+    m_streamBuffer->setToolTip(tr("In-memory buffer per remote stream. At least the track size keeps the whole "
+                                  "track in memory, making seeks instant."));
     m_remotePrebuffer->setRange(100, 10000);
     m_remotePrebuffer->setSingleStep(100);
     m_remotePrebuffer->setSuffix(u" ms"_s);
@@ -166,6 +172,7 @@ SubsonicSettingsPageWidget::SubsonicSettingsPageWidget(std::shared_ptr<NetworkAc
     auto* playbackForm = new QFormLayout;
     playbackForm->addRow(tr("Stream format"), m_format);
     playbackForm->addRow(tr("Max bitrate"), m_maxBitRate);
+    playbackForm->addRow(tr("Stream buffer"), m_streamBuffer);
     playbackForm->addRow(tr("Remote prebuffer"), m_remotePrebuffer);
     playbackForm->addRow(tr("Seek fade"), fadeRow);
     playbackForm->addRow({}, m_scrobble);
@@ -253,6 +260,7 @@ void SubsonicSettingsPageWidget::load(const SubsonicSettings& settings)
 
     m_maxBitRate->setValue(settings.maxBitRate);
     m_libraryDir->setText(settings.libraryDir);
+    m_streamBuffer->setValue(settings.streamBufferMb);
     m_remotePrebuffer->setValue(settings.remotePrebufferMs);
     m_seekFade->setChecked(settings.seekFadeEnabled);
     m_seekFadeMs->setValue(settings.seekFadeMs);
@@ -275,7 +283,8 @@ void SubsonicSettingsPageWidget::apply()
     SubsonicSettings settings = uiSettings();
     settings.format       = m_format->currentData().toString();
     settings.maxBitRate   = (settings.format == "raw"_L1) ? 0 : m_maxBitRate->value();
-    settings.libraryDir             = m_libraryDir->text().trimmed();
+    settings.libraryDir   = m_libraryDir->text().trimmed();
+    settings.streamBufferMb         = m_streamBuffer->value();
     settings.remotePrebufferMs      = m_remotePrebuffer->value();
     settings.seekFadeEnabled        = m_seekFade->isChecked();
     settings.seekFadeMs             = m_seekFadeMs->value();

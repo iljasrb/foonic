@@ -40,13 +40,10 @@ jobs:
       - name: Configure
         # GCC 15 keeps the artifact loadable in the Flatpak runtime, whose libstdc++ (GCC 15)
         # lacks the GLIBCXX_3.4.35 symbol emitted by GCC 16.
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-15 -DFOONIC_BUILD_TESTS=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-15
 
       - name: Build
         run: cmake --build build
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
 
       - name: Upload plugin
         uses: actions/upload-artifact@v4

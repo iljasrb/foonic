@@ -59,6 +59,8 @@ constexpr qint64 SeekBackMargin = 128LL * 1024;
 // A forward seek within this distance keeps the running transfer and waits for it to reach the
 // target instead of cancelling and re-requesting.
 constexpr qint64 CoverWaitGap = 2LL * 1024 * 1024;
+// Enough audio to cover decoder prefill and a slow connection before fetching more.
+constexpr qint64 ReadAheadTargetBytes = 8LL * 1024 * 1024;
 // FFmpeg can issue follow-up seeks more than a second after the first one.
 constexpr qint64 SeekSettleMs = 2000;
 std::atomic_bool remotePrepareTargetAllowed{false};
@@ -470,6 +472,9 @@ public:
                || monotonicMs() - m_state->lastSeekMs < SeekSettleMs) {
                 return;
             }
+            if(m_state->entry && m_state->entry->contiguousBytes(m_state->readPos) >= ReadAheadTargetBytes) {
+                return;
+            }
             auto gap = m_state->entry ? m_state->entry->firstGapFrom(m_state->readPos) : std::nullopt;
             if(!gap && m_state->entry) {
                 gap = m_state->entry->firstGap(); // nothing ahead: slowly fill what is behind
@@ -533,7 +538,12 @@ public:
         qCDebug(SUBSONIC) << "stream" << m_id << "open cache" << m_state->entry->path() << "total"
                           << m_state->entry->total() << "complete" << complete;
         if(!complete) {
-            startTransfer(0, -1, false);
+            // A prefetch may already have left plenty of audio on disk. Do not start another
+            // transfer until the reader gets close to the cached end.
+            const qint64 cachedAhead = m_state->entry->contiguousBytes(0);
+            if(cachedAhead < ReadAheadTargetBytes) {
+                startTransfer(0, -1, false);
+            }
         }
 
         // Never block the thread that owns the network manager: its event loop is what delivers the

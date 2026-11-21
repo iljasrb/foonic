@@ -568,7 +568,9 @@ public:
             close();
             return false;
         }
-        if(!complete && error.isEmpty() && status < 200) {
+        // If the cache already told us the size, we opened without waiting for headers. A missing
+        // status here only means the transfer has not answered yet, not that the server failed.
+        if(!complete && total < 0 && error.isEmpty() && status < 200) {
             error = QStringLiteral("No response from the server.");
         }
         qCDebug(SUBSONIC) << "stream" << m_id << "open result: total" << total << "status" << status << "seekable"

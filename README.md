@@ -1,93 +1,64 @@
 # foonic
 
-A [fooyin](https://github.com/fooyin/fooyin) plugin that browses and streams music from a
-Subsonic-compatible server (Navidrome, Gonic, Airsonic...).
-
-## Features
-
-| Feature | Status |
-|---|---|
-| Library browser (**View → Foonic Browser**) and layout widget (Internet category) | Implemented |
-| Drag-and-drop / menu add to a fooyin playlist, Play Next, Add to Queue | Implemented |
-| Subsonic playlists, and server playlist editing (create / add / remove / rename / delete) | Implemented |
-| Library search and playlist search | Implemented |
-| Server setup; settings persist across restarts | Implemented |
-| Track metadata + cover art in the browser | Implemented |
-| Remote streams are seekable + pausable (HTTP Range) | Implemented |
-| Seek fade (fade out/in) around remote seeks | Implemented |
-| Next-track prefetch once the current track is fully buffered | Implemented |
-| Transcoding (stream format + max bitrate) | Unverified |
-| Download to Library (tagged files added to the fooyin library) | Implemented |
-| Scrobbling (now playing + play counts) | Implemented |
-| Star / unstar, random + starred discovery | Unverified |
+A [fooyin](https://github.com/fooyin/fooyin) plugin for browsing and streaming music from a
+Subsonic-compatible server (Navidrome, Gonic, Airsonic, ...).
 
 ## Install
 
 1. Download `fyplugin_foonic.so` from the
-[Releases](https://github.com/iljasrb/foonic/releases) page.
-2. Install it in fooyin: Settings → Plugins → Install, or drop it
-into fooyin's plugin directory:
+   [Releases](https://github.com/iljasrb/foonic/releases) page.
+2. Install it with **Settings → Plugins → Install**, or copy it to fooyin's plugin directory:
 
-```sh
-mkdir -p ~/.local/lib/fooyin/plugins
-cp fyplugin_foonic.so ~/.local/lib/fooyin/plugins/
-```
+   ```sh
+   mkdir -p ~/.local/lib/fooyin/plugins
+   cp fyplugin_foonic.so ~/.local/lib/fooyin/plugins/
+   ```
 
-Restart fooyin, then open **View → Foonic Browser**.
+3. Restart fooyin and open **View → Foonic Browser**.
 
-## Build from source
+## Use
 
-Requires fooyin development files (headers + `FooyinConfig.cmake`) and Qt 6.
+- Browse artists, albums, playlists and search results; double-click a song to play it.
+- Drag tracks onto a fooyin playlist, or use the context menu to Play, Play Next, Add to Queue,
+  Download to Library, star/unstar, or add to a server playlist.
+- The **Foonic Browser** layout widget can be embedded under **Internet**.
+- **Download to Library** saves the original file with tags and cover art under the configured
+  library folder.
+
+## Settings
+
+Settings are under **Settings → Foonic**:
+
+- **Server**: URL, username/password or API key, SSL handling, music folder and cover-art size.
+- **Stream format / max bitrate**: play the original file (default) or transcode.
+- **Remote prebuffer**: decoded audio buffered before resuming after a remote seek.
+- **Seek fade**: fade out/in around remote seeks.
+- **Session cache**: disk space used for the current fooyin session. The current track and the
+  next track are cached; playback and prefetch share the same file. The cache is deleted when
+  fooyin exits.
+- **Library folder**: destination for **Download to Library**.
+- **Buffered range on the seekbar**: show which parts of the current track are cached.
+
+## Notes
+
+- The password or API key is stored in fooyin's settings file in plain text.
+- Subsonic stream URLs contain authentication parameters and are stored in fooyin playlists.
+  Protect fooyin's playlist database like its settings file.
+- Debug logs: `QT_LOGGING_RULES="fy.subsonic.debug=true"`.
+
+## Build
+
+Requires fooyin development files and Qt 6:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Then copy `build/fyplugin_foonic.so` as above, or install system-wide with
-`sudo cmake --install build`.
+Run the tests with:
 
-## Usage
-
-- **View → Foonic Browser** opens it in a window.
-- Or add the **Foonic Browser** layout widget (under *Internet*) to embed it in a layout.
-
-The browser has a **Filter** box that searches the server (Subsonic `search3`, falling back to
-`search2`) for matching artists, albums, playlists and songs and shows them as grouped results.
-
-Drag a selection onto a playlist,
-right-click for Play / Add to Playlist / Play Next / Add to Queue / Download to Library / Star /
-Unstar, or double-click a song to play it. Right-click empty space for **Random songs** and
-**Starred songs**, right-click songs to add them to a **server playlist** (or create one), and
-right-click a playlist to rename or delete it. Right-click a song inside an expanded playlist to
-remove it from that playlist. **Refresh** reloads the list.
-
-**Download to Library** works on any selection (a song, album, artist, playlist or several of them),
-saves each track into the library folder below, writes its tags and cover art, and adds it to the
-fooyin library. Files are laid out as `AlbumArtist/Album/NN - Title.ext` and already-present files are
-skipped. Tracks that already exist in the library are played and seeked from disk.
-
-## Settings
-
-All under **Settings → Foonic**:
-
-- **Server config** (URL, username, password, authentication mode / API key, SSL, music folder,
-  cover-art size). Authentication can be token (default), plaintext password, or an OpenSubsonic
-  API key.
-- **Stream format** (Original / MP3 / Opus / AAC) and **Max bitrate**.
-- **Stream buffer** — in-memory buffer per remote stream (default 64 MB). At least the track size
-  keeps the whole track in memory, which makes seeks instant.
-- **Remote prebuffer** — audio buffered before playback resumes after a remote seek (default 400 ms).
-- **Seek fade** — fade out/in around remote seeks, and the fade length (default 200 ms).
-- **Scrobbling** — report now playing and play counts back to the server.
-- **Buffered range on the seekbar** — show the downloaded part of the current remote track.
-- **Library folder** — where **Download to Library** saves tracks (default `~/Music/Subsonic`). Point
-  it at a folder inside one of your fooyin library paths so downloads become library tracks.
-
-The browser's **Downloaded** column marks songs that already exist as a tagged file in the library
-folder.
-
-## Notes
-
-- The password (or API key) is stored in fooyin's settings file in plain text.
-- Logs use the `fy.subsonic` category (`QT_LOGGING_RULES="fy.subsonic.debug=true"`).
+```sh
+cmake -S . -B build -DFOONIC_BUILD_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```

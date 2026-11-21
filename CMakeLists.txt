@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(foonic VERSION 0.8.1 LANGUAGES CXX)
+project(foonic VERSION 0.8.2 LANGUAGES CXX)
 
 find_package(Fooyin REQUIRED)
 

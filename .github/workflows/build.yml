@@ -13,14 +13,17 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Build against Fedora 44's fooyin 0.14.1 (Qt 6.11), not Arch's rolling Qt.
-    # A plugin tagged against Qt 6.12 fails to load on Fedora 44 and the Flatpak runtime (Qt 6.11)
-    # with "version `Qt_6.12' not found".
-    container: registry.fedoraproject.org/fedora:44
+    strategy:
+      fail-fast: false
+      matrix:
+        # Fedora 44 ships fooyin 0.14 / Qt 6.11 (the Flatpak runtime baseline).
+        # Fedora 45 tracks the current upstream fooyin / distro Qt.
+        fedora: [44, 45]
+    container: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
     steps:
       - name: Install build dependencies
         run: |
-          dnf install -y cmake ninja-build gcc15-c++ git ca-certificates \
+          dnf install -y cmake ninja-build gcc-c++ git ca-certificates \
             qt6-qtbase-devel qt6-qtsvg-devel fooyin-devel
 
       - uses: actions/checkout@v4
@@ -38,22 +41,23 @@ jobs:
           echo "plugin=$plugin_version" >> "$GITHUB_OUTPUT"
 
       - name: Configure
-        # GCC 15 keeps the artifact loadable in the Flatpak runtime, whose libstdc++ (GCC 15)
-        # lacks the GLIBCXX_3.4.35 symbol emitted by GCC 16.
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-15
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFOONIC_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build build
 
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
       - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
-          name: fyplugin_foonic
+          name: fyplugin_foonic-fedora${{ matrix.fedora }}
           path: build/fyplugin_foonic.so
           if-no-files-found: error
 
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Attach Fedora 44 build to release
+        if: startsWith(github.ref, 'refs/tags/') && matrix.fedora == 44
         uses: softprops/action-gh-release@v2
         with:
           prerelease: false

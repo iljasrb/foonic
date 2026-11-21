@@ -81,6 +81,7 @@ private:
     QString m_currentId;
     QString m_nextId;
     QSet<QString> m_pinnedIds;
+    int m_prepareWindowGeneration{0};
 
     // Next track downloading into the same cache entry that playback will use.
     QNetworkReply* m_prefetchReply{nullptr};

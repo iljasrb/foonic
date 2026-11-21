@@ -8,6 +8,7 @@
 
 #include "subsonicbuffermonitor.h"
 #include "subsonicclient.h"
+#include "subsonicremoteplayback.h"
 #include "subsonicsettings.h"
 #include "subsonicstreamcache.h"
 #include "subsonicstreamutils.h"
@@ -51,7 +52,30 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
         return;
     }
 
+    connect(m_player, &PlayerController::trackChangeRequested, this,
+            [this](const Player::TrackChangeRequest& request) {
+                const bool manual = request.context.userInitiated
+                    || request.context.reason == Player::AdvanceReason::ManualSelection
+                    || request.context.reason == Player::AdvanceReason::ManualNext
+                    || request.context.reason == Player::AdvanceReason::ManualPrevious;
+                if(!manual) {
+                    return;
+                }
+
+                // Let fooyin prepare the clicked track while the current one keeps playing. The
+                // window expires so a failed/rejected change cannot affect a later automatic end.
+                setRemotePrepareTargetAllowed(true);
+                const int generation = ++m_prepareWindowGeneration;
+                QTimer::singleShot(10000, this, [this, generation] {
+                    if(generation == m_prepareWindowGeneration) {
+                        setRemotePrepareTargetAllowed(false);
+                    }
+                });
+            });
     connect(m_player, &PlayerController::currentTrackChanged, this, [this](const Track& track) {
+        ++m_prepareWindowGeneration;
+        setRemotePrepareTargetAllowed(false);
+
         const QString newId = songIdForTrack(track);
         // If the prefetched track is now playing, keep its partial cache: the stream device picks
         // it up and continues from the first hole instead of starting the download again.
@@ -107,6 +131,8 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
     connect(m_player, &PlayerController::playStateChanged, this,
             [this](Player::PlayState state, Player::PlayState) {
                 if(state == Player::PlayState::Stopped) {
+                    ++m_prepareWindowGeneration;
+                    setRemotePrepareTargetAllowed(false);
                     cancelPrefetch(true);
                     if(m_bufferMonitor) {
                         m_bufferMonitor->reset();
@@ -125,6 +151,7 @@ SubsonicPlaybackController::SubsonicPlaybackController(std::shared_ptr<NetworkAc
 
 SubsonicPlaybackController::~SubsonicPlaybackController()
 {
+    setRemotePrepareTargetAllowed(false);
     cancelPrefetch(true);
 
     // A settings override left behind by an active remote track must not outlive the plugin.
@@ -167,10 +194,11 @@ void SubsonicPlaybackController::updateSubsonicFade(bool active)
         const SubsonicSettings settings = loadSubsonicSettings(m_settings);
         const int fadeMs = std::clamp(settings.seekFadeMs, 0, 5000);
         values.seek = {.in = fadeMs, .out = fadeMs, .curve = Engine::FadeCurve::Linear, .enabled = settings.seekFadeEnabled};
-        // Do not configure a manual crossfade: fooyin would prepare a remote crossfade target before
-        // a user track change, and a non-started remote decoder cannot prime that stream. A normal
-        // manual change fade still works and track clicks load immediately.
-        values.manualChange.enabled = false;
+        // Manual changes prepare the clicked track while the current one keeps playing. The decoder
+        // only allows candidate priming during the short window opened by trackChangeRequested.
+        values.manualChange.enabled = true;
+        values.manualChange.in      = 150;
+        values.manualChange.out     = 150;
         values.autoChange.enabled   = false;
         m_settings->set(crossfadeKey, true);
         m_settings->set(valuesKey, QVariant::fromValue(values));

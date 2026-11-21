@@ -31,5 +31,8 @@ class SubsonicBufferMonitor;
 std::shared_ptr<SubsonicBufferMonitor> registerSubsonicRemotePlayback(
     const std::shared_ptr<AudioLoader>& loader, std::shared_ptr<NetworkAccessManager> network,
     SettingsManager* settings, std::shared_ptr<SessionCache> cache);
+
+//! Allows a not-yet-started decoder to prime a target stream for a manual track change.
+void setRemotePrepareTargetAllowed(bool allowed);
 } // namespace Subsonic
 } // namespace Fooyin

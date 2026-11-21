@@ -59,6 +59,7 @@ constexpr qint64 SeekBackMargin = 128LL * 1024;
 // A forward seek within this distance keeps the running transfer and waits for it to reach the
 // target instead of cancelling and re-requesting.
 constexpr qint64 CoverWaitGap = 2LL * 1024 * 1024;
+std::atomic_bool remotePrepareTargetAllowed{false};
 qint64 monotonicMs()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1348,11 +1349,17 @@ public:
 
     [[nodiscard]] bool allowsConcurrentDecoding() const override
     {
-        // Fooyin's drain-fill preparation asks a not-yet-started candidate decoder whether it may
-        // prime a stream. Returning true there leads to a prepared remote stream being committed
-        // and then loaded again, restarting the track. The active playback decoder has been
-        // started, so it still allows concurrent reads while the candidate does not.
-        return m_started && m_inner && m_inner->allowsConcurrentDecoding();
+        if(!m_inner) {
+            return false;
+        }
+        if(m_started) {
+            return m_inner->allowsConcurrentDecoding();
+        }
+        // A candidate may only prime a target stream for a user-initiated track change. Automatic
+        // drain-fill preparation must not arm a prepared remote stream: fooyin would commit it and
+        // then load the same track again.
+        return remotePrepareTargetAllowed.load(std::memory_order_relaxed)
+            && m_inner->allowsConcurrentDecoding();
     }
 
     [[nodiscard]] int playbackPrebufferMs() const override
@@ -1420,6 +1427,11 @@ private:
     bool m_started{false};
 };
 } // namespace
+
+void setRemotePrepareTargetAllowed(bool allowed)
+{
+    remotePrepareTargetAllowed.store(allowed, std::memory_order_relaxed);
+}
 
 std::shared_ptr<SubsonicBufferMonitor> registerSubsonicRemotePlayback(
     const std::shared_ptr<AudioLoader>& loader, std::shared_ptr<NetworkAccessManager> network,
